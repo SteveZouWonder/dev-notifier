@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.2.0] - 2026-07-01
+
+### Added
+- automate CHANGELOG-driven release notes and archival
+
+### Other
+- UX improvements: manual-check feedback, status submenu, theme fixes, no auto-open
+
 ## [v1.1.0]
 
 ### Added
