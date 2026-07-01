@@ -117,8 +117,23 @@ jobs:
             prev="$(git rev-list --max-parents=0 HEAD | tail -1)"
           fi
           echo "prev=$prev"
-          # The changelog job archives after release, so prefer the [vX.Y.Z]
-          # section and fall back to [Unreleased] when not yet archived.
+
+          # Archive [Unreleased] into this version's section FIRST, so the
+          # release notes reflect exactly what will land in CHANGELOG.md —
+          # including entries auto-generated from git commits when [Unreleased]
+          # is empty. This edit is local to the runner and is NOT committed; the
+          # real archival to the default branch happens in the `changelog` job
+          # (via PR). `bump` is idempotent: if the version is already archived
+          # (e.g. hand-archived earlier), it exits non-zero and we just extract.
+          if ! grep -q "## \[v${version}\]" CHANGELOG.md; then
+            python scripts/bump_changelog.py bump \
+              --version "$version" \
+              --until "v${version}" || true
+          fi
+
+          # Now the [vX.Y.Z] section is guaranteed present (either pre-existing,
+          # hand-written, or just auto-generated). Prefer it; fall back to
+          # [Unreleased] for safety.
           changes="$(python scripts/bump_changelog.py extract --version "$version" 2>/dev/null || true)"
           if [ -z "$changes" ]; then
             changes="$(python scripts/bump_changelog.py extract --version unreleased 2>/dev/null || true)"
