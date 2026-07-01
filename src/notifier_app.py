@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -116,12 +117,53 @@ class NotifierApp(rumps.App):
         self.state = _load_state()
         self.recent = []  # list of {id, label, url} entries for the menu
         self._recent_counter = 0
-        self.dep_status = deps_mod.check_dependencies(self.cfg)
+        self._polling = False  # guard against overlapping polls (slow network)
+        # Defer dependency checks off the startup path: check_dependencies()
+        # shells out to `gh` (network calls, up to 15s each) which would block
+        # the menu-bar icon from appearing. Start with a placeholder status,
+        # draw the menu immediately, then run the real check in the background.
+        self.dep_status = {
+            "gh": {"installed": False, "authed": False, "login": "", "detail": ""},
+            "jira": {"enabled": False, "configured": False, "detail": ""},
+            "github_ok": False,
+            "jira_ok": False,
+            "ok": False,
+            "problems": [],
+            "pending": True,  # first real check hasn't run yet
+        }
         self._build_menu()
-        self._warn_if_unmet()
+        # Run the first dependency check + startup warning shortly after the
+        # event loop starts, so the icon shows up instantly.
+        self._startup_timer = rumps.Timer(self._initial_check, 0.5)
+        self._startup_timer.start()
         interval = self.cfg.get("poll", {}).get("interval_seconds", 300)
         self.timer = rumps.Timer(self.on_tick, interval)
         self.timer.start()
+
+    def _initial_check(self, sender):
+        """Kick off the first dependency check in the background (one-shot)."""
+        sender.stop()
+
+        def worker():
+            status = deps_mod.check_dependencies(self.cfg)
+
+            def apply(_):
+                self.dep_status = status
+                self._build_menu()
+                self._warn_if_unmet()
+
+            self._run_on_main(apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_on_main(self, fn):
+        """Schedule ``fn`` to run once on the main thread via a short timer.
+
+        AppKit/rumps UI updates must happen on the main thread; worker threads
+        use this to hand results back safely.
+        """
+        timer = rumps.Timer(lambda t: (t.stop(), fn(t)), 0.01)
+        timer.start()
 
     def _warn_if_unmet(self):
         """On startup, if nothing is usable, guide the user via a notification."""
@@ -168,6 +210,13 @@ class NotifierApp(rumps.App):
     def _status_menuitem(self):
         """Status ▸ submenu with one short line per source (Jira / GitHub)."""
         s = self.dep_status
+        if s.get("pending"):
+            # First background check hasn't finished yet.
+            parent = rumps.MenuItem("Status", callback=self._recheck_deps)
+            parent.add(rumps.MenuItem("Checking…", callback=None))
+            parent.add(rumps.separator)
+            parent.add(rumps.MenuItem("Re-check now", callback=self._recheck_deps))
+            return parent
         if s["jira_ok"]:
             jira_line = "Jira: ✓ Ready"
         elif s["jira"]["enabled"]:
@@ -189,23 +238,32 @@ class NotifierApp(rumps.App):
         return parent
 
     def _recheck_deps(self, _):
-        self.dep_status = deps_mod.check_dependencies(self.cfg)
-        self._build_menu()
-        s = self.dep_status
-        if s["problems"]:
-            rumps.notification(
-                title="Dev Notifier — dependency check",
-                subtitle="Issues found",
-                message="; ".join(s["problems"])[:200],
-                data={}, sound=False,
-            )
-        else:
-            rumps.notification(
-                title="Dev Notifier — dependency check",
-                subtitle="All good",
-                message="Jira / GitHub are ready.",
-                data={}, sound=False,
-            )
+        # Run the (network-bound) check on a worker thread so the menu bar does
+        # not freeze; apply the result on the main thread.
+        def worker():
+            status = deps_mod.check_dependencies(self.cfg)
+
+            def apply(_):
+                self.dep_status = status
+                self._build_menu()
+                if status["problems"]:
+                    rumps.notification(
+                        title="Dev Notifier — dependency check",
+                        subtitle="Issues found",
+                        message="; ".join(status["problems"])[:200],
+                        data={}, sound=False,
+                    )
+                else:
+                    rumps.notification(
+                        title="Dev Notifier — dependency check",
+                        subtitle="All good",
+                        message="Jira / GitHub are ready.",
+                        data={}, sound=False,
+                    )
+
+            self._run_on_main(apply)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _toggle_login_item(self, sender):
         if deps_mod.login_item_enabled():
@@ -286,60 +344,100 @@ class NotifierApp(rumps.App):
         self.on_tick(None, manual=True)
 
     def on_tick(self, _, manual=False):
-        self.cfg = cfg_mod.ensure_config()
-        self.dep_status = deps_mod.check_dependencies(self.cfg)
-        if not self.dep_status.get("ok"):
-            _log("WARN: no usable source; " + "; ".join(self.dep_status["problems"]))
-            self._build_menu()
+        """Timer/manual entry point. Runs the network work off the main thread
+        so the menu bar never freezes; all UI/notification work is handed back
+        to the main thread when the poll finishes."""
+        if self._polling:
+            # A previous poll is still running (slow network). Skip overlapping
+            # runs; on a manual trigger, tell the user it's already working.
             if manual:
                 rumps.notification(
                     title="Dev Notifier",
-                    subtitle="Nothing to check",
-                    message=(self.dep_status["problems"][0]
-                             if self.dep_status["problems"]
-                             else "Configure Jira/GitHub first."),
+                    subtitle="Already checking…",
+                    message="A check is already in progress.",
                     data={}, sound=False,
                 )
             return
-        seen = self.state.setdefault("seen", {})
-        new_count = 0
+        self._polling = True
+
+        def worker():
+            try:
+                self._poll_once(manual)
+            finally:
+                self._polling = False
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _poll_once(self, manual):
+        """Do the network-bound poll on a worker thread; apply results on main."""
+        cfg = cfg_mod.ensure_config()
+        dep_status = deps_mod.check_dependencies(cfg)
+        if not dep_status.get("ok"):
+            _log("WARN: no usable source; " + "; ".join(dep_status["problems"]))
+
+            def apply_unusable(_):
+                self.cfg = cfg
+                self.dep_status = dep_status
+                self._build_menu()
+                if manual:
+                    rumps.notification(
+                        title="Dev Notifier",
+                        subtitle="Nothing to check",
+                        message=(dep_status["problems"][0]
+                                 if dep_status["problems"]
+                                 else "Configure Jira/GitHub first."),
+                        data={}, sound=False,
+                    )
+
+            self._run_on_main(apply_unusable)
+            return
+
         _log("=== poll start ===")
         try:
-            phases = poll_mod.collect_all(self.cfg, log=_log)
+            phases = poll_mod.collect_all(cfg, log=_log)
         except Exception as e:  # noqa: BLE001
             _log(f"ERROR collect_all: {e}")
             return
-        for _phase, items in phases:
-            for it in items:
-                fp = it["fp"]
-                if fp in seen:
-                    continue
-                if it.get("ci_only") and it.get("ci_rollup") == "pass":
+
+        # Apply results (notifications, state, menu) on the main thread.
+        def apply_results(_):
+            self.cfg = cfg
+            self.dep_status = dep_status
+            seen = self.state.setdefault("seen", {})
+            new_count = 0
+            for _phase, items in phases:
+                for it in items:
+                    fp = it["fp"]
+                    if fp in seen:
+                        continue
+                    if it.get("ci_only") and it.get("ci_rollup") == "pass":
+                        seen[fp] = time.time()
+                        continue
+                    url = it.get("url", "")
+                    # Notify only; the URL opens when the user clicks the
+                    # notification (or a Recent entry). No auto-open.
+                    self._notify(it)
+                    self._recent_counter += 1
+                    self.recent.insert(0, {
+                        "id": self._recent_counter,
+                        "label": f"{it['subtitle']} — {it['message']}"[:80],
+                        "url": url,
+                    })
                     seen[fp] = time.time()
-                    continue
-                url = it.get("url", "")
-                # Notify only; the URL opens when the user clicks the
-                # notification (or a Recent entry). No auto-open.
-                self._notify(it)
-                self._recent_counter += 1
-                self.recent.insert(0, {
-                    "id": self._recent_counter,
-                    "label": f"{it['subtitle']} — {it['message']}"[:80],
-                    "url": url,
-                })
-                seen[fp] = time.time()
-                new_count += 1
-        self.recent = self.recent[:10]
-        _save_state(self.state)
-        self._build_menu()
-        _log(f"=== poll done: {new_count} new ===")
-        if manual and new_count == 0:
-            rumps.notification(
-                title="Dev Notifier",
-                subtitle="Checked — no new items",
-                message="You're all caught up.",
-                data={}, sound=False,
-            )
+                    new_count += 1
+            self.recent = self.recent[:10]
+            _save_state(self.state)
+            self._build_menu()
+            _log(f"=== poll done: {new_count} new ===")
+            if manual and new_count == 0:
+                rumps.notification(
+                    title="Dev Notifier",
+                    subtitle="Checked — no new items",
+                    message="You're all caught up.",
+                    data={}, sound=False,
+                )
+
+        self._run_on_main(apply_results)
 
     def _notify(self, it: dict):
         url = it.get("url", "")
