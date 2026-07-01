@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 
 import urllib.request
 
+import deps as _deps
+
 
 def _log(msg: str) -> None:
     # Lazy import to avoid a hard dependency loop; app wires real logging.
@@ -103,7 +105,8 @@ def jira_items(cfg: dict, window_min: int) -> list:
 def _gh_json(args: list):
     try:
         out = subprocess.run(
-            ["gh"] + args, check=True, capture_output=True, text=True, timeout=45
+            [_deps.gh_path()] + args, check=True, capture_output=True,
+            text=True, timeout=45, env=_deps.augmented_env(),
         ).stdout
         return json.loads(out) if out.strip() else []
     except subprocess.CalledProcessError as e:
@@ -119,15 +122,13 @@ def gh_login(cfg: dict) -> str:
     login = cfg.get("github", {}).get("login", "")
     if login:
         return login
-    data = _gh_json(["api", "user", "--jq", ".login"])
-    if isinstance(data, str):
-        return data
-    # --jq returns a bare string; _gh_json tries json.loads which fails on bare
-    # word, so fall back to a raw call.
+    # `gh api user --jq .login` returns a bare string (not JSON), so call it
+    # raw rather than through _gh_json (which would try json.loads and fail).
     try:
         out = subprocess.run(
-            ["gh", "api", "user", "--jq", ".login"],
+            [_deps.gh_path(), "api", "user", "--jq", ".login"],
             check=True, capture_output=True, text=True, timeout=30,
+            env=_deps.augmented_env(),
         ).stdout.strip()
         return out
     except Exception:  # noqa: BLE001

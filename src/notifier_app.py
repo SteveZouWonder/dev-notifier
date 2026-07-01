@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import rumps
 
 import config as cfg_mod
+import deps as deps_mod
 import poll as poll_mod
 
 # Selectable menu-bar themes. Each has a colored lightning-bolt PNG icon in
@@ -108,15 +109,35 @@ class NotifierApp(rumps.App):
         self.state = _load_state()
         self.recent = []  # list of {id, label, url} entries for the menu
         self._recent_counter = 0
+        self.dep_status = deps_mod.check_dependencies(self.cfg)
         self._build_menu()
+        self._warn_if_unmet()
         interval = self.cfg.get("poll", {}).get("interval_seconds", 300)
         self.timer = rumps.Timer(self.on_tick, interval)
         self.timer.start()
 
+    def _warn_if_unmet(self):
+        """On startup, if nothing is usable, guide the user via a notification."""
+        if not self.dep_status.get("ok"):
+            msg = self.dep_status["problems"][0] if self.dep_status["problems"] \
+                else "Open config file to set up Jira/GitHub."
+            try:
+                rumps.notification(
+                    title="Dev Notifier — setup needed",
+                    subtitle="No working source yet",
+                    message=msg,
+                    data={},
+                    sound=False,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
     # -- menu ---------------------------------------------------------------
     def _build_menu(self):
         self.menu.clear()
-        items = ["Check now"]
+        items = [rumps.MenuItem("Check now", callback=self.check_now)]
+        # status line
+        items.append(self._status_menuitem())
         items.append(rumps.separator)
         if self.recent:
             items.append(rumps.MenuItem("Recent:", callback=None))
@@ -128,9 +149,54 @@ class NotifierApp(rumps.App):
             items.append(rumps.MenuItem("(no recent items)", callback=None))
         items.append(rumps.separator)
         items.append(self._theme_submenu())
+        # start-at-login toggle
+        login_item = rumps.MenuItem("Start at login", callback=self._toggle_login_item)
+        login_item.state = 1 if deps_mod.login_item_enabled() else 0
+        items.append(login_item)
+        items.append(rumps.MenuItem("Check dependencies", callback=self._recheck_deps))
         items.append(rumps.MenuItem("Open config file", callback=self._open_config))
         items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
         self.menu = items
+
+    def _status_menuitem(self):
+        s = self.dep_status
+        parts = []
+        parts.append("Jira ✓" if s["jira_ok"] else
+                     ("Jira …" if s["jira"]["enabled"] else "Jira off"))
+        parts.append("GitHub ✓" if s["github_ok"] else
+                     ("GitHub …" if self.cfg.get("github", {}).get("enabled")
+                      else "GitHub off"))
+        label = "Status: " + "  ·  ".join(parts)
+        item = rumps.MenuItem(label, callback=self._recheck_deps)
+        return item
+
+    def _recheck_deps(self, _):
+        self.dep_status = deps_mod.check_dependencies(self.cfg)
+        self._build_menu()
+        s = self.dep_status
+        if s["problems"]:
+            rumps.notification(
+                title="Dev Notifier — dependency check",
+                subtitle="Issues found",
+                message="; ".join(s["problems"])[:200],
+                data={}, sound=False,
+            )
+        else:
+            rumps.notification(
+                title="Dev Notifier — dependency check",
+                subtitle="All good",
+                message="Jira / GitHub are ready.",
+                data={}, sound=False,
+            )
+
+    def _toggle_login_item(self, sender):
+        if deps_mod.login_item_enabled():
+            ok = deps_mod.disable_login_item()
+            _log(f"login item disabled ok={ok}")
+        else:
+            ok = deps_mod.enable_login_item()
+            _log(f"login item enabled ok={ok}")
+        self._build_menu()
 
     def _theme_submenu(self):
         """Theme ▸ submenu; the active theme is checkmarked and shows its icon."""
@@ -196,14 +262,15 @@ class NotifierApp(rumps.App):
         subprocess.run(["open", str(cfg_mod.config_path())], check=False)
 
     # -- polling ------------------------------------------------------------
-    @rumps.clicked("Check now")
     def check_now(self, _):
         self.on_tick(None)
 
     def on_tick(self, _):
         self.cfg = cfg_mod.ensure_config()
-        if not cfg_mod.is_configured(self.cfg):
-            _log("WARN: not configured; open config file to set up Jira/GitHub")
+        self.dep_status = deps_mod.check_dependencies(self.cfg)
+        if not self.dep_status.get("ok"):
+            _log("WARN: no usable source; " + "; ".join(self.dep_status["problems"]))
+            self._build_menu()
             return
         seen = self.state.setdefault("seen", {})
         max_open = self.cfg.get("poll", {}).get("max_auto_open", 3)

@@ -7,7 +7,7 @@
 [![Release](https://img.shields.io/github/v/release/SteveZouWonder/dev-notifier)](../../releases)
 [![Python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org/)
 
-[Download](#download--install) · [Configure](#configuration) · [Build from source](#build-from-source)
+[Download](#download--install) · [Configure](#configuration) · [Tutorial](TUTORIAL.md) · [Build from source](#build-from-source)
 
 </div>
 
@@ -81,10 +81,33 @@ The config file stays on your machine and is never committed.
 
 ## Menu
 
-- **Check now** — poll immediately.
-- **Recent:** — the last items seen; click one to reopen it.
+- **Check now** — poll immediately (manual pull).
+- **Status:** — shows whether Jira / GitHub are ready; click to re-check.
+- **Recent:** — the last items seen; hover → **Open** / **Remove**.
+- **Clear all recent** — empty the list.
+- **Theme ▸** — switch the menu-bar icon color.
+- **Start at login** — toggle auto-start (installs/removes a LaunchAgent).
+- **Check dependencies** — re-run the gh / Jira checks.
 - **Open config file** — edit your settings.
 - **Quit**.
+
+### Dependency checks
+
+On startup the app verifies the `gh` CLI (installed + logged in) and your Jira
+config, showing the result in the **Status:** line and guiding you if something
+is missing. You can also run the standalone doctor:
+
+```bash
+bash scripts/doctor.sh
+```
+
+### Start at login
+
+Enable **Start at login** to auto-launch on login. It writes a per-user
+LaunchAgent to `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`; toggling
+it off removes that file. Nothing is installed system-wide.
+
+See the full [Tutorial](TUTORIAL.md) for setup, troubleshooting, and uninstall.
 
 ## Build from source
 
