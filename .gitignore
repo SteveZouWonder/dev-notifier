@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
+
+# macOS
+.DS_Store
+
+# Local runtime config / state (NEVER commit — may contain tokens)
+config.json
+*.local.json
+
+# IDE
+.idea/
+.vscode/

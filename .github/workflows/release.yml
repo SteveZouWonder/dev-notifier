@@ -1,0 +1,96 @@
+name: Release Build
+
+# Triggers:
+#   1) Push a v* tag (e.g. v1.0.0) -> build + publish a GitHub Release
+#   2) Manual run (workflow_dispatch) with a version input
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without v prefix (e.g. 1.0.0)'
+        required: true
+        default: '0.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          version="${version#v}"
+          if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+            echo "::error::Invalid version '$version' (expected X.Y.Z)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $version"
+
+  build-macos:
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Install librsvg (for crisp SVG->PNG icon rendering)
+        run: brew install librsvg || true
+
+      - name: Generate icon
+        run: python scripts/generate_icon.py
+
+      - name: Build with PyInstaller
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+        run: pyinstaller packaging/dev-notifier.spec --noconfirm
+
+      - name: Package DMG
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          brew install create-dmg || true
+          bash packaging/macos_package.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DevNotifier-macos
+          path: dist/*.dmg
+
+  release:
+    needs: [prepare, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: DevNotifier-macos
+          path: artifacts
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.prepare.outputs.version) }}
+          name: Dev Notifier ${{ needs.prepare.outputs.version }}
+          generate_release_notes: true
+          files: artifacts/*.dmg
