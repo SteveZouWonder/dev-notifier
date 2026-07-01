@@ -233,28 +233,121 @@ def generate_body_from_git(
     return "\n".join(lines)
 
 
-def cmd_extract(args: argparse.Namespace) -> int:
-    path = Path(args.file)
-    text = path.read_text(encoding="utf-8")
-    lines = text.splitlines()
+def extract_version_body(lines: list[str], target: str) -> str | None:
+    """Return the cleaned body of a version/Unreleased section, or None if absent.
 
-    target = args.version.strip()
-    if target.lower() == "unreleased":
+    ``target`` may be ``unreleased`` (case-insensitive) or a version with/without
+    a leading ``v``. Usage-hint blockquote lines are stripped.
+    """
+    if target.strip().lower() == "unreleased":
         heading = UNRELEASED_HEADING
     else:
         heading = f"## [{normalize_version(target)}]"
-
     bounds = find_section_bounds(lines, heading)
     if bounds is None:
-        print(f"::error::Section {heading} not found", file=sys.stderr)
-        return 1
+        return None
     start, end = bounds
     body = extract_body(lines, start, end)
-    # Drop the usage-hint blockquote lines (starting with '>') so they do not
-    # pollute the Release Notes.
     body_lines = [ln for ln in body.splitlines() if not ln.lstrip().startswith(">")]
-    body = "\n".join(body_lines).strip()
+    return "\n".join(body_lines).strip()
+
+
+def cmd_extract(args: argparse.Namespace) -> int:
+    path = Path(args.file)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    body = extract_version_body(lines, args.version)
+    if body is None:
+        # With --quiet, a missing section is not an error: print nothing and
+        # exit 0 so callers can probe for a section without log noise (the
+        # release workflow tries [vX.Y.Z] then falls back to [Unreleased]).
+        if args.quiet:
+            return 0
+        target = args.version.strip()
+        heading = (
+            UNRELEASED_HEADING
+            if target.lower() == "unreleased"
+            else f"## [{normalize_version(target)}]"
+        )
+        print(f"::error::Section {heading} not found", file=sys.stderr)
+        return 1
     sys.stdout.write(body + ("\n" if body else ""))
+    return 0
+
+
+# Fixed preamble/footer for GitHub Release notes. Kept here (not in the
+# workflow) so the release job and the fix-up script produce identical notes.
+RELEASE_NOTES_PLACEHOLDER = (
+    "_No specific changes recorded in CHANGELOG for this release._"
+)
+
+
+def build_release_notes(
+    lines: list[str], version: str, repo: str, prev_ref: str | None
+) -> tuple[str, bool]:
+    """Assemble full GitHub Release notes for ``version`` (without a v prefix).
+
+    Prefers the ``[vX.Y.Z]`` section, falling back to ``[Unreleased]``. Returns
+    ``(notes_markdown, had_changes)`` where ``had_changes`` is False when the
+    changes body fell back to the placeholder (so callers can warn).
+    """
+    changes = extract_version_body(lines, version)
+    if not changes:
+        changes = extract_version_body(lines, "unreleased")
+    had_changes = bool(changes)
+    if not changes:
+        changes = RELEASE_NOTES_PLACEHOLDER
+
+    compare = ""
+    if prev_ref:
+        compare = (
+            f"\n**Full compare**: "
+            f"https://github.com/{repo}/compare/{prev_ref}...v{version}\n"
+        )
+
+    notes = (
+        f"macOS menu-bar notifier for Jira & GitHub.\n"
+        f"\n"
+        f"## Download & Install\n"
+        f"\n"
+        f"| Platform | File | How to install |\n"
+        f"|----------|------|----------------|\n"
+        f"| macOS | `DevNotifier-{version}.dmg` | Open, then drag into Applications |\n"
+        f"\n"
+        f"> Verify file integrity via the attached `SHA256SUMS.txt`.\n"
+        f"\n"
+        f"## macOS note (first launch)\n"
+        f"This is a free, open-source app **without an Apple Developer certificate**,\n"
+        f"so it is not notarized. On first launch:\n"
+        f"**right-click DevNotifier.app -> Open -> click Open again** in the dialog.\n"
+        f"If it says \"damaged and can't be opened\", run in Terminal:\n"
+        f"```\n"
+        f"xattr -dr com.apple.quarantine /Applications/DevNotifier.app\n"
+        f"```\n"
+        f"\n"
+        f"---\n"
+        f"## What's changed\n"
+        f"\n"
+        f"{changes}\n"
+        f"{compare}"
+    )
+    return notes, had_changes
+
+
+def cmd_release_notes(args: argparse.Namespace) -> int:
+    path = Path(args.file)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    version = args.version.strip().lstrip("v")
+    notes, had_changes = build_release_notes(
+        lines, version, args.repo, args.prev or None
+    )
+    if not had_changes:
+        print(
+            f"::warning::Release notes for v{version} have no CHANGELOG entries; "
+            f"using a placeholder. Add entries under [Unreleased] or "
+            f"[v{version}] and re-run.",
+            file=sys.stderr,
+        )
+    sys.stdout.write(notes if notes.endswith("\n") else notes + "\n")
     return 0
 
 
@@ -390,7 +483,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_extract.add_argument(
         "--version", required=True, help="Version number or 'unreleased'"
     )
+    p_extract.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Treat a missing section as empty (print nothing, exit 0) instead "
+        "of erroring; useful for probing sections without log noise",
+    )
     p_extract.set_defaults(func=cmd_extract)
+
+    p_notes = sub.add_parser(
+        "release-notes",
+        help="Assemble full GitHub Release notes for a version (to stdout)",
+    )
+    p_notes.add_argument("--version", required=True, help="Version (with or without v)")
+    p_notes.add_argument(
+        "--repo", required=True, help="owner/name, for the compare link"
+    )
+    p_notes.add_argument(
+        "--prev", help="Previous ref for the compare link; omit to skip the link"
+    )
+    p_notes.set_defaults(func=cmd_release_notes)
 
     return parser
 

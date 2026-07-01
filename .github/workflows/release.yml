@@ -131,44 +131,14 @@ jobs:
               --until "v${version}" || true
           fi
 
-          # Now the [vX.Y.Z] section is guaranteed present (either pre-existing,
-          # hand-written, or just auto-generated). Prefer it; fall back to
-          # [Unreleased] for safety.
-          changes="$(python scripts/bump_changelog.py extract --version "$version" 2>/dev/null || true)"
-          if [ -z "$changes" ]; then
-            changes="$(python scripts/bump_changelog.py extract --version unreleased 2>/dev/null || true)"
-          fi
-          if [ -z "$changes" ]; then
-            changes="_No specific changes recorded in CHANGELOG for this release._"
-          fi
-
-          {
-            echo "macOS menu-bar notifier for Jira & GitHub."
-            echo
-            echo "## Download & Install"
-            echo
-            echo "| Platform | File | How to install |"
-            echo "|----------|------|----------------|"
-            echo "| macOS | \`DevNotifier-${version}.dmg\` | Open, then drag into Applications |"
-            echo
-            echo "> Verify file integrity via the attached \`SHA256SUMS.txt\`."
-            echo
-            echo "## macOS note (first launch)"
-            echo "This is a free, open-source app **without an Apple Developer certificate**,"
-            echo "so it is not notarized. On first launch:"
-            echo "**right-click DevNotifier.app -> Open -> click Open again** in the dialog."
-            echo "If it says \"damaged and can't be opened\", run in Terminal:"
-            echo '```'
-            echo "xattr -dr com.apple.quarantine /Applications/DevNotifier.app"
-            echo '```'
-            echo
-            echo "---"
-            echo "## What's changed"
-            echo
-            echo "$changes"
-            echo
-            echo "**Full compare**: https://github.com/${{ github.repository }}/compare/$prev...v${version}"
-          } > release_notes.md
+          # Assemble the notes via the shared builder so this workflow and the
+          # scripts/fix_release_notes.py backfill tool stay byte-for-byte in
+          # sync. It prefers [vX.Y.Z], falls back to [Unreleased], and warns
+          # (::warning::) if it has to use the placeholder.
+          python scripts/bump_changelog.py release-notes \
+            --version "$version" \
+            --repo "${{ github.repository }}" \
+            --prev "$prev" > release_notes.md
 
           echo "==> release_notes.md"
           cat release_notes.md
@@ -236,7 +206,9 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
 
       - name: Create Pull Request
+        id: cpr
         if: steps.archive.outputs.changed == 'true'
+        continue-on-error: true  # don't fail the run; we warn explicitly below
         uses: peter-evans/create-pull-request@v7
         with:
           # Defaults to GITHUB_TOKEN (needs "Allow Actions to create PRs").
@@ -256,3 +228,17 @@ jobs:
           delete-branch: true
           add-paths: |
             CHANGELOG.md
+
+      - name: Warn if CHANGELOG archival did not open a PR
+        if: steps.archive.outputs.changed == 'true' && steps.cpr.outcome != 'success'
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          echo "::warning::CHANGELOG archival for v${version} did not open a PR."
+          echo "::warning::The Release was published, but CHANGELOG.md was NOT"
+          echo "::warning::archived on 'main' — [Unreleased] still holds this"
+          echo "::warning::version's entries. This usually means Actions lacks"
+          echo "::warning::permission to create PRs. Fix via Settings -> Actions"
+          echo "::warning::-> General -> 'Allow GitHub Actions to create and"
+          echo "::warning::approve pull requests', or set a CHANGELOG_PAT secret."
+          echo "::warning::Then re-run this job, or archive manually:"
+          echo "::warning::  python scripts/bump_changelog.py bump --version ${version} --until v${version}"
