@@ -82,15 +82,162 @@ jobs:
     needs: [prepare, build-macos]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout (for CHANGELOG + scripts)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full tag history for the "full compare" link
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - uses: actions/download-artifact@v4
         with:
           name: DevNotifier-macos
           path: artifacts
+
+      - name: Generate SHA-256 checksums
+        run: |
+          mkdir -p artifacts/checksums
+          (
+            cd artifacts
+            find . -type f -name '*.dmg' -exec shasum -a 256 {} \; > checksums/SHA256SUMS.txt
+          )
+          echo "==> SHA256SUMS.txt"
+          cat artifacts/checksums/SHA256SUMS.txt
+
+      - name: Build release notes from CHANGELOG
+        id: notes
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          # Previous version tag (for the "full compare" link). Take the tag
+          # ordered right before v${version}; fall back to the first commit.
+          prev="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | awk -v cur="v${version}" '$0==cur{found=1; next} found{print; exit}')"
+          if [ -z "$prev" ]; then
+            prev="$(git rev-list --max-parents=0 HEAD | tail -1)"
+          fi
+          echo "prev=$prev"
+          # The changelog job archives after release, so prefer the [vX.Y.Z]
+          # section and fall back to [Unreleased] when not yet archived.
+          changes="$(python scripts/bump_changelog.py extract --version "$version" 2>/dev/null || true)"
+          if [ -z "$changes" ]; then
+            changes="$(python scripts/bump_changelog.py extract --version unreleased 2>/dev/null || true)"
+          fi
+          if [ -z "$changes" ]; then
+            changes="_No specific changes recorded in CHANGELOG for this release._"
+          fi
+
+          {
+            echo "macOS menu-bar notifier for Jira & GitHub."
+            echo
+            echo "## Download & Install"
+            echo
+            echo "| Platform | File | How to install |"
+            echo "|----------|------|----------------|"
+            echo "| macOS | \`DevNotifier-${version}.dmg\` | Open, then drag into Applications |"
+            echo
+            echo "> Verify file integrity via the attached \`SHA256SUMS.txt\`."
+            echo
+            echo "## macOS note (first launch)"
+            echo "This is a free, open-source app **without an Apple Developer certificate**,"
+            echo "so it is not notarized. On first launch:"
+            echo "**right-click DevNotifier.app -> Open -> click Open again** in the dialog."
+            echo "If it says \"damaged and can't be opened\", run in Terminal:"
+            echo '```'
+            echo "xattr -dr com.apple.quarantine /Applications/DevNotifier.app"
+            echo '```'
+            echo
+            echo "---"
+            echo "## What's changed"
+            echo
+            echo "$changes"
+            echo
+            echo "**Full compare**: https://github.com/${{ github.repository }}/compare/$prev...v${version}"
+          } > release_notes.md
+
+          echo "==> release_notes.md"
+          cat release_notes.md
 
       - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.prepare.outputs.version) }}
           name: Dev Notifier ${{ needs.prepare.outputs.version }}
-          generate_release_notes: true
-          files: artifacts/*.dmg
+          # Release notes come from the CHANGELOG-derived release_notes.md,
+          # keeping the release page consistent with the CHANGELOG.
+          body_path: release_notes.md
+          files: |
+            artifacts/*.dmg
+            artifacts/checksums/SHA256SUMS.txt
+
+  # ---------------------------------------------------------------------------
+  # Auto-archive CHANGELOG: fold [Unreleased] into the released version section,
+  # commit to a new branch and open a PR (no direct push to the default branch,
+  # to respect branch protection). Runs only when a v* tag is pushed; manual
+  # workflow_dispatch runs do not archive.
+  #
+  # Prerequisite (one of the following, otherwise "Create PR" fails on perms):
+  #   1) Settings -> Actions -> General -> Workflow permissions:
+  #      enable "Allow GitHub Actions to create and approve pull requests"; or
+  #   2) Provide a PAT with repo + PR write scope as secrets.CHANGELOG_PAT and
+  #      uncomment the token line below.
+  # ---------------------------------------------------------------------------
+  changelog:
+    needs: [prepare, release]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Archive [Unreleased] into version section
+        id: archive
+        run: |
+          version="${{ needs.prepare.outputs.version }}"
+          # Skip if this version is already archived (e.g. re-run).
+          if grep -q "## \[v${version}\]" CHANGELOG.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CHANGELOG already contains v${version}; skipping archive"
+            exit 0
+          fi
+          # Archive [Unreleased]:
+          #   - if it has hand-written notes, archive them directly;
+          #   - if empty, the script auto-fills from git commits (Conventional
+          #     Commits). --until points to this release's tag; --since is
+          #     inferred as the previous version tag.
+          python scripts/bump_changelog.py bump \
+            --version "$version" \
+            --until "v${version}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Create Pull Request
+        if: steps.archive.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          # Defaults to GITHUB_TOKEN (needs "Allow Actions to create PRs").
+          # To use a PAT, uncomment and configure the CHANGELOG_PAT secret:
+          # token: ${{ secrets.CHANGELOG_PAT }}
+          base: main
+          branch: chore/changelog-v${{ needs.prepare.outputs.version }}
+          commit-message: "docs: archive CHANGELOG [Unreleased] into v${{ needs.prepare.outputs.version }}"
+          title: "docs: archive CHANGELOG into v${{ needs.prepare.outputs.version }}"
+          body: |
+            Automated archive: on releasing `v${{ needs.prepare.outputs.version }}`,
+            the CHANGELOG `[Unreleased]` section is folded into
+            `## [v${{ needs.prepare.outputs.version }}]` and an empty
+            `[Unreleased]` is restored.
+
+            Please review and merge.
+          delete-branch: true
+          add-paths: |
+            CHANGELOG.md
