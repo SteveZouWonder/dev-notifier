@@ -101,8 +101,7 @@ Open it from the menu: **menu-bar icon → Open config file**, and fill in:
   },
   "poll": {
     "interval_seconds": 300,
-    "window_minutes": 10,
-    "max_auto_open": 3
+    "window_minutes": 10
   },
   "theme": "Orange"
 }
@@ -118,8 +117,7 @@ Field reference:
 | `github.login` | Leave blank to auto-detect via `gh api user` |
 | `poll.interval_seconds` | How often to check (default 300 = 5 min) |
 | `poll.window_minutes` | How far back each check looks (default 10) |
-| `poll.max_auto_open` | Max links auto-opened per check (default 3) |
-| `theme` | `Orange` \| `Green` \| `Purple` \| `Rainbow` \| `Bell` |
+| `theme` | `Orange` \| `Green` \| `Purple` \| `Rainbow` \| `Yellow` |
 
 After editing, click **Check dependencies** in the menu — the **Status:** line
 should show `Jira ✓  ·  GitHub ✓`.
@@ -139,9 +137,9 @@ should show `Jira ✓  ·  GitHub ✓`.
   on ❌ failures / ⏳ pending even if GitHub notification settings suppress them.
   Green CI does not notify.
 
-When something new appears, Dev Notifier shows a native notification and
-auto-opens the link (capped by `max_auto_open`). **Clicking any notification
-opens its Jira issue / PR in your browser.**
+When something new appears, Dev Notifier shows a native notification.
+**Clicking the notification opens its Jira issue / PR in your browser.** You can
+also reopen anything later from the **Recent:** menu.
 
 ---
 

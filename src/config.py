@@ -31,10 +31,9 @@ DEFAULT_CONFIG = {
     "poll": {
         "interval_seconds": 300,
         "window_minutes": 10,
-        "max_auto_open": 3,
     },
     "theme": "Orange",
-    "_theme_options": "Orange | Green | Purple | Rainbow | Bell (also switchable from the menu)",
+    "_theme_options": "Orange | Green | Purple | Rainbow | Yellow (also switchable from the menu)",
 }
 
 

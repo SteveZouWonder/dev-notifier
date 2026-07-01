@@ -19,14 +19,16 @@ ASSETS = ROOT / "assets"
 TEMPLATE = ASSETS / "icon_template.svg"
 MENUBAR_DIR = ASSETS / "menubar"
 
-# theme -> (C1 primary, C2 secondary, GLOW). Keep in sync with THEMES in
+# theme -> (C1 top, C3 middle, C2 bottom, GLOW) for the bolt's 3-stop gradient.
+# Solid themes use close shades so the bolt looks single-hued; Rainbow spans the
+# spectrum so it reads as multicolor. Keep in sync with THEMES in
 # src/notifier_app.py.
 THEME_COLORS = {
-    "Orange": ("#ff9a3c", "#ff5e3a", "#ff7a45"),
-    "Green": ("#34e0a1", "#0ea5a5", "#22d3aa"),
-    "Purple": ("#c084fc", "#7c3aed", "#a855f7"),
-    "Rainbow": ("#ffd166", "#ef476f", "#06d6a0"),
-    "Bell": ("#fde047", "#f59e0b", "#fbbf24"),
+    "Orange": ("#ffb347", "#ff8a3c", "#ff5e3a", "#ff7a45"),
+    "Green": ("#5ff0b0", "#34e0a1", "#0ea5a5", "#22d3aa"),
+    "Purple": ("#d6a8ff", "#c084fc", "#7c3aed", "#a855f7"),
+    "Rainbow": ("#ff5e5e", "#ffd166", "#3b82f6", "#a855f7"),
+    "Yellow": ("#fff08a", "#fde047", "#f59e0b", "#fbbf24"),
 }
 DEFAULT_THEME = "Orange"
 
@@ -55,9 +57,10 @@ def _render_svg_to_png(svg_path: Path, png_path: Path, px: int) -> None:
 
 
 def _themed_svg(theme: str, tmp_dir: Path) -> Path:
-    c1, c2, glow = THEME_COLORS[theme]
+    c1, c3, c2, glow = THEME_COLORS[theme]
     text = TEMPLATE.read_text(encoding="utf-8")
-    text = text.replace("{C1}", c1).replace("{C2}", c2).replace("{GLOW}", glow)
+    text = (text.replace("{C1}", c1).replace("{C3}", c3)
+                .replace("{C2}", c2).replace("{GLOW}", glow))
     out = tmp_dir / f"{theme}.svg"
     out.write_text(text, encoding="utf-8")
     return out
