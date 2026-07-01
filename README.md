@@ -23,8 +23,7 @@ Dev Notifier lives in your menu bar and polls, every few minutes:
   on ❌ failures / ⏳ pending even if notification settings suppress them.
 
 When something new shows up it raises a **native macOS notification**, and
-**clicking the notification opens the Jira issue / PR in your browser**. New
-items are also auto-opened (capped, so you don't get a wall of tabs).
+**clicking the notification opens the Jira issue / PR in your browser**.
 
 Because it's a properly bundled `.app` with its own bundle identifier, macOS
 grants it real notification permission — unlike ad-hoc `osascript`/CLI
@@ -64,8 +63,7 @@ Open it (menu-bar icon → **Open config file**) and fill in your details:
   },
   "poll": {
     "interval_seconds": 300,
-    "window_minutes": 10,
-    "max_auto_open": 3
+    "window_minutes": 10
   }
 }
 ```
@@ -75,7 +73,7 @@ Open it (menu-bar icon → **Open config file**) and fill in your details:
 - **GitHub:** no token needed — it uses the [`gh` CLI](https://cli.github.com).
   Run `gh auth login` once. Leave `login` blank to auto-detect.
 - **poll:** `interval_seconds` how often to check, `window_minutes` how far
-  back each check looks, `max_auto_open` how many links to auto-open per check.
+  back each check looks.
 
 The config file stays on your machine and is never committed.
 
