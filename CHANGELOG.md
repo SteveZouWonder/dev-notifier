@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.3.0] - 2026-07-01
+
+### Fixed
+- eliminate startup lag by moving network checks off the main thread
+
 ## [v1.2.0] - 2026-07-01
 
 ### Added
