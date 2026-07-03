@@ -1,0 +1,14 @@
+# Coverage configuration for the dev-notifier test suite.
+[run]
+# Which files to measure is driven by the --cov targets in pytest.ini (src and
+# the bump_changelog module). Here we only tune reporting; ignore test files.
+omit =
+    tests/*
+
+[report]
+# Lines that never run under unit tests (entry-point guards, defensive
+# re-raises) are excluded so the report reflects real logic coverage.
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:
+    raise SystemExit

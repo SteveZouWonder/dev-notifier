@@ -5,6 +5,15 @@ __pycache__/
 .venv/
 venv/
 env/
+.pytest_cache/
+
+# Test / coverage / CI report artifacts
+.coverage
+coverage.xml
+htmlcov/
+bandit-report.json
+pip-audit-report.json
+pip-audit-check.json
 
 # PyInstaller build output
 build/
