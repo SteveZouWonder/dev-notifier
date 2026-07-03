@@ -1,6 +1,8 @@
 <div align="center">
 
-# Dev Notifier 🔔
+<img src="assets/app-icon.png" alt="Dev Notifier app icon" width="128" height="128" />
+
+# Dev Notifier
 
 ### A tiny macOS menu-bar app that watches Jira, GitHub & PagerDuty for things relevant to you and shows clickable desktop notifications
 
