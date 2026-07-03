@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - first-run poll lookback (`poll.window_minutes`, the fallback used when there is no prior poll) now defaults to 24 hours instead of 10 minutes, so the very first poll after install surfaces the past day's activity
 
+### Fixed
+- "Check for updates" failing with "Couldn't check / Check your network" because the updater verified TLS with the default CA store, which the packaged app / stock macOS Python cannot use to verify `api.github.com`; it now uses the `certifi` CA bundle (same fix already applied to Jira/PagerDuty)
+
 ## [v1.5.1] - 2026-07-03
 
 ### Changed

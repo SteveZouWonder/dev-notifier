@@ -51,6 +51,36 @@ def test_current_version_from_source(updater_mod, monkeypatch):
     assert updater_mod.current_version() == updater_mod.__version__
 
 
+def test_ssl_context_uses_certifi_bundle(updater_mod, monkeypatch):
+    captured = {}
+
+    def fake_create(*a, **k):
+        captured["cafile"] = k.get("cafile")
+        return "CTX"
+
+    monkeypatch.setattr(updater_mod.ssl, "create_default_context", fake_create)
+    assert updater_mod._ssl_context() == "CTX"
+    assert captured["cafile"] and captured["cafile"].endswith("cacert.pem")
+
+
+def test_ssl_context_falls_back_without_certifi(updater_mod, monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_certifi(name, *a, **k):
+        if name == "certifi":
+            raise ImportError("no certifi")
+        return real_import(name, *a, **k)
+
+    calls = []
+    monkeypatch.setattr(builtins, "__import__", no_certifi)
+    monkeypatch.setattr(updater_mod.ssl, "create_default_context",
+                        lambda *a, **k: calls.append(k) or "DEFAULT_CTX")
+    assert updater_mod._ssl_context() == "DEFAULT_CTX"
+    assert calls == [{}]  # fallback path: no cafile kwarg
+
+
 def test_is_frozen_reflects_sys_flag(updater_mod, monkeypatch):
     monkeypatch.setattr(updater_mod.sys, "frozen", True, raising=False)
     assert updater_mod.is_frozen() is True

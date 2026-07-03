@@ -49,6 +49,26 @@ _DMG_NAME_RE = re.compile(r"DevNotifier-.*\.dmg$", re.IGNORECASE)
 CACHE_DIR = Path.home() / "Library" / "Caches" / "dev-notifier"
 
 
+def _ssl_context() -> ssl.SSLContext:
+    """Return an SSL context that can verify public CAs.
+
+    The stock macOS system Python (and a PyInstaller bundle) does not read the
+    keychain, so the default CA store often cannot verify ``api.github.com``'s
+    certificate chain (CERTIFICATE_VERIFY_FAILED), which made "Check for
+    updates" fail with "Couldn't check". Prefer ``certifi``'s bundle when
+    available; fall back to the default context otherwise.
+    """
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001 - certifi missing or unreadable bundle
+        return ssl.create_default_context()
+
+
+_SSL_CTX = _ssl_context()
+
+
 # ---------------------------------------------------------------------------
 # version handling
 # ---------------------------------------------------------------------------
@@ -113,8 +133,7 @@ def _http_get(url: str, accept: str = "application/vnd.github+json") -> bytes:
         url,
         headers={"User-Agent": _USER_AGENT, "Accept": accept},
     )
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT, context=ctx) as resp:
+    with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT, context=_SSL_CTX) as resp:
         return resp.read()
 
 
@@ -258,9 +277,8 @@ def download_and_open(info: dict, log=None) -> dict:
         dest = CACHE_DIR / dmg_name
 
         _log(f"UPDATE downloading {dmg_url}")
-        ctx = ssl.create_default_context()
         req = urllib.request.Request(dmg_url, headers={"User-Agent": _USER_AGENT})
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT * 4, context=ctx) as resp, \
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT * 4, context=_SSL_CTX) as resp, \
                 dest.open("wb") as f:
             hasher = hashlib.sha256()
             while True:
