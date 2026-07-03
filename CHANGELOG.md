@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.5.0] - 2026-07-03
+
+### Added
+- add PagerDuty as a notification source
+- theme desktop notification icons
+
+### Fixed
+- verify TLS for Jira/PagerDuty via certifi CA bundle
+
+### Other
+- verify notification icon follows theme switch
+
 ## [v1.4.0] - 2026-07-03
 
 ### Added
