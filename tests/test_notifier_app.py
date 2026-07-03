@@ -413,6 +413,30 @@ def test_notify_swallows_errors(app, app_mod, monkeypatch):
     app._notify({"title": "t", "subtitle": "s", "message": "m", "url": ""})
 
 
+def test_post_notification_uses_theme_icon(app, app_mod, monkeypatch):
+    app_mod.rumps._notifications_sent.clear()
+    app.cfg["theme"] = "Purple"
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: f"/icons/{t}.png")
+    app._post_notification(title="t", subtitle="s", message="m", data={})
+    sent = app_mod.rumps._notifications_sent[-1]
+    assert sent["icon"] == "/icons/Purple.png"
+
+
+def test_post_notification_no_icon_when_missing(app, app_mod, monkeypatch):
+    app_mod.rumps._notifications_sent.clear()
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: None)
+    app._post_notification(title="t", subtitle="s", message="m", data={})
+    assert app_mod.rumps._notifications_sent[-1]["icon"] is None
+
+
+def test_post_notification_explicit_icon_preserved(app, app_mod, monkeypatch):
+    app_mod.rumps._notifications_sent.clear()
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: "/icons/theme.png")
+    app._post_notification(title="t", subtitle="s", message="m", data={},
+                           icon="/custom.png")
+    assert app_mod.rumps._notifications_sent[-1]["icon"] == "/custom.png"
+
+
 def test_toggle_login_item(app, app_mod, monkeypatch):
     state = {"enabled": False}
     monkeypatch.setattr(app_mod.deps_mod, "login_item_enabled",

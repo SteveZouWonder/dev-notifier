@@ -130,7 +130,7 @@ def fake_rumps():
     def _notification(title="", subtitle="", message="", data=None, **k):
         stub._notifications_sent.append(
             {"title": title, "subtitle": subtitle, "message": message,
-             "data": data or {}})
+             "data": data or {}, "icon": k.get("icon")})
 
     stub.App = _App
     stub.MenuItem = _MenuItem
