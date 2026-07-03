@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - automatic update checks against GitHub Releases: menu-bar prompt + clickable notification when a newer version is available, with one-click download (SHA-256 verified) that opens the DMG to install; "Check for updates" and "Skip this version" menu actions
+- immediate feedback for manual "Check now": a themed spinner menu-bar icon and a "Checking…" menu item that follow the active theme's colors, restored when the check finishes
+
+### Fixed
+- manual checks producing no notifications at all: poll results were scheduled onto the main thread with an NSTimer started from a worker thread, which never fired and silently dropped every result; results are now marshalled via `AppHelper.callAfter`
+- surface a "Check failed" notification when a manual check errors, instead of failing silently
+
+### Documentation
+- add `AGENTS.md` with mandatory AI-agent instructions (Git workflow, testing/coverage, threading, icons, release rules)
+
+### Build
+- add a pytest suite and CI/CD pipeline; stub `PyObjCTools` so `notifier_app` imports on Linux CI without PyObjC
 
 ## [v1.3.0] - 2026-07-01
 
