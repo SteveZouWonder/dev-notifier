@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
 TEMPLATE = ASSETS / "icon_template.svg"
+CHECKING_TEMPLATE = ASSETS / "icon_checking_template.svg"
 MENUBAR_DIR = ASSETS / "menubar"
 
 # theme -> (C1 top, C3 middle, C2 bottom, GLOW) for the bolt's 3-stop gradient.
@@ -56,12 +57,13 @@ def _render_svg_to_png(svg_path: Path, png_path: Path, px: int) -> None:
         shutil.copy(produced, png_path)
 
 
-def _themed_svg(theme: str, tmp_dir: Path) -> Path:
+def _themed_svg(theme: str, tmp_dir: Path, template: Path = TEMPLATE,
+                suffix: str = "") -> Path:
     c1, c3, c2, glow = THEME_COLORS[theme]
-    text = TEMPLATE.read_text(encoding="utf-8")
+    text = template.read_text(encoding="utf-8")
     text = (text.replace("{C1}", c1).replace("{C3}", c3)
                 .replace("{C2}", c2).replace("{GLOW}", glow))
-    out = tmp_dir / f"{theme}.svg"
+    out = tmp_dir / f"{theme}{suffix}.svg"
     out.write_text(text, encoding="utf-8")
     return out
 
@@ -98,6 +100,12 @@ def main() -> None:
             png = MENUBAR_DIR / f"{theme}.png"
             _render_svg_to_png(svg, png, MENUBAR_PX)
             print(f"menu-bar icon: {png}")
+            # "checking" (busy) variant, same theme colors, spinner arc.
+            if CHECKING_TEMPLATE.exists():
+                csvg = _themed_svg(theme, tmp, CHECKING_TEMPLATE, "-checking")
+                cpng = MENUBAR_DIR / f"{theme}-checking.png"
+                _render_svg_to_png(csvg, cpng, MENUBAR_PX)
+                print(f"menu-bar icon: {cpng}")
         # app icon from default theme
         default_svg = _themed_svg(DEFAULT_THEME, tmp)
         _build_icns(default_svg, ASSETS / "icon.icns", tmp)

@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timezone
 
 import rumps
+from PyObjCTools import AppHelper
 
 import config as cfg_mod
 import deps as deps_mod
@@ -47,6 +48,12 @@ def _assets_dir():
 
 def _theme_icon(theme: str):
     path = os.path.join(_assets_dir(), f"{theme}.png")
+    return path if os.path.exists(path) else None
+
+
+def _theme_checking_icon(theme: str):
+    """Themed 'checking' (busy) spinner icon, or None if not bundled."""
+    path = os.path.join(_assets_dir(), f"{theme}-checking.png")
     return path if os.path.exists(path) else None
 
 
@@ -119,6 +126,8 @@ class NotifierApp(rumps.App):
         self.recent = []  # list of {id, label, url} entries for the menu
         self._recent_counter = 0
         self._polling = False  # guard against overlapping polls (slow network)
+        self._checking = False  # True while a manual check is in flight (UI hint)
+        self._base_title = None  # menu-bar title without the "checking" indicator
         # Defer dependency checks off the startup path: check_dependencies()
         # shells out to `gh` (network calls, up to 15s each) which would block
         # the menu-bar icon from appearing. Start with a placeholder status,
@@ -291,13 +300,35 @@ class NotifierApp(rumps.App):
             _log(f"update {ver} skipped")
 
     def _run_on_main(self, fn):
-        """Schedule ``fn`` to run once on the main thread via a short timer.
+        """Schedule ``fn`` to run once on the main thread.
 
         AppKit/rumps UI updates must happen on the main thread; worker threads
         use this to hand results back safely.
+
+        NOTE: this must NOT use ``rumps.Timer`` — an NSTimer started from a
+        worker thread is registered on that thread's (non-running) run loop and
+        never fires, which silently drops all poll results. ``AppHelper.callAfter``
+        marshals the call onto the main thread's run loop instead.
         """
-        timer = rumps.Timer(lambda t: (t.stop(), fn(t)), 0.01)
-        timer.start()
+        AppHelper.callAfter(fn, None)
+
+    def _enter_checking(self):
+        """Show the themed 'checking' spinner icon + in-menu hint (main thread)."""
+        self._checking = True
+        theme = self.cfg.get("theme", DEFAULT_THEME)
+        spinner = _theme_checking_icon(theme)
+        if spinner:
+            self.icon = spinner
+        self._build_menu()
+
+    def _exit_checking(self):
+        """Restore the normal themed icon + menu after a check (main thread)."""
+        self._checking = False
+        theme = self.cfg.get("theme", DEFAULT_THEME)
+        icon = _theme_icon(theme)
+        if icon:
+            self.icon = icon
+        self._build_menu()
 
     def _warn_if_unmet(self):
         """On startup, if nothing is usable, guide the user via a notification."""
@@ -318,7 +349,11 @@ class NotifierApp(rumps.App):
     # -- menu ---------------------------------------------------------------
     def _build_menu(self):
         self.menu.clear()
-        items = [rumps.MenuItem("Check now", callback=self.check_now)]
+        if self._checking:
+            # Immediate, in-menu feedback that a manual check is running.
+            items = [rumps.MenuItem("Checking…", callback=None)]
+        else:
+            items = [rumps.MenuItem("Check now", callback=self.check_now)]
         # status line
         items.append(self._status_menuitem())
         items.append(rumps.separator)
@@ -448,7 +483,10 @@ class NotifierApp(rumps.App):
         name = getattr(sender, "theme_name", DEFAULT_THEME)
         self.cfg["theme"] = name
         _save_config(self.cfg)
-        icon = _theme_icon(name)
+        # If a check is in flight, keep showing the (themed) spinner variant.
+        icon = _theme_checking_icon(name) if self._checking else None
+        if not icon:
+            icon = _theme_icon(name)
         if icon:
             self.icon = icon
         else:
@@ -492,8 +530,11 @@ class NotifierApp(rumps.App):
 
     # -- polling ------------------------------------------------------------
     def check_now(self, _):
-        # Manual pull: always give visible feedback so the user knows it worked
-        # even when there is nothing new.
+        # Manual pull: give IMMEDIATE visible feedback (themed spinner icon +
+        # "Checking…" menu item) so the click registers instantly, even though
+        # the network work runs in the background and results arrive later.
+        if not self._polling:
+            self._enter_checking()
         self.on_tick(None, manual=True)
 
     def on_tick(self, _, manual=False):
@@ -531,8 +572,10 @@ class NotifierApp(rumps.App):
             def apply_unusable(_):
                 self.cfg = cfg
                 self.dep_status = dep_status
-                self._build_menu()
-                if manual:
+                if manual and self._checking:
+                    self._exit_checking()  # restores icon + rebuilds menu
+                else:
+                    self._build_menu()
                     rumps.notification(
                         title="Dev Notifier",
                         subtitle="Nothing to check",
@@ -550,6 +593,19 @@ class NotifierApp(rumps.App):
             phases = poll_mod.collect_all(cfg, log=_log)
         except Exception as e:  # noqa: BLE001
             _log(f"ERROR collect_all: {e}")
+
+            def apply_error(_):
+                if manual and self._checking:
+                    self._exit_checking()
+                if manual:
+                    rumps.notification(
+                        title="Dev Notifier",
+                        subtitle="Check failed",
+                        message=f"Could not fetch updates: {e}"[:200],
+                        data={}, sound=False,
+                    )
+
+            self._run_on_main(apply_error)
             return
 
         # Apply results (notifications, state, menu) on the main thread.
@@ -580,7 +636,10 @@ class NotifierApp(rumps.App):
                     new_count += 1
             self.recent = self.recent[:10]
             _save_state(self.state)
-            self._build_menu()
+            if manual and self._checking:
+                self._exit_checking()  # restores icon + rebuilds menu
+            else:
+                self._build_menu()
             _log(f"=== poll done: {new_count} new ===")
             if manual and new_count == 0:
                 rumps.notification(

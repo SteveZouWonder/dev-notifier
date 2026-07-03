@@ -21,6 +21,9 @@ _icon = PROJECT_ROOT / "assets" / "icon.icns"
 app_icon = str(_icon) if _icon.exists() else None
 
 hiddenimports = collect_submodules("rumps")
+# notifier_app imports PyObjCTools.AppHelper to marshal worker-thread results
+# back onto the main run loop; ensure PyInstaller bundles it explicitly.
+hiddenimports += ["PyObjCTools", "PyObjCTools.AppHelper"]
 
 a = Analysis(
     [str(PROJECT_ROOT / "launcher.py")],

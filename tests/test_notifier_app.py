@@ -723,3 +723,167 @@ def test_poll_once_manual_no_new_items_notifies(sync_app, app_mod, monkeypatch):
     sync_app._poll_once(manual=True)
     assert any("no new items" in n["subtitle"]
                for n in app_mod.rumps._notifications_sent)
+
+
+# ---------------------------------------------------------------------------
+# "Checking…" busy state — themed spinner icon + in-menu hint
+# ---------------------------------------------------------------------------
+
+def test_theme_checking_icon_missing_returns_none(app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod.os.path, "exists", lambda p: False)
+    assert app_mod._theme_checking_icon("Orange") is None
+
+
+def test_theme_checking_icon_present_returns_path(app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod.os.path, "exists", lambda p: True)
+    path = app_mod._theme_checking_icon("Rainbow")
+    assert path.endswith("Rainbow-checking.png")
+
+
+def test_enter_checking_sets_flag_and_spinner_icon(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_checking_icon",
+                        lambda name: f"/tmp/{name}-checking.png")
+    app.cfg["theme"] = "Green"
+    app._enter_checking()
+    assert app._checking is True
+    assert app.icon == "/tmp/Green-checking.png"
+    # The menu's first entry becomes the disabled "Checking…" hint.
+    titles = [getattr(i, "title", "") for i in app.menu]
+    assert "Checking…" in titles
+    assert "Check now" not in titles
+
+
+def test_enter_checking_without_spinner_icon_keeps_flag(app, app_mod, monkeypatch):
+    # No spinner asset bundled -> flag still set, icon unchanged, menu hint shown.
+    monkeypatch.setattr(app_mod, "_theme_checking_icon", lambda name: None)
+    app.icon = "/tmp/prev.png"
+    app._enter_checking()
+    assert app._checking is True
+    assert app.icon == "/tmp/prev.png"
+    assert "Checking…" in [getattr(i, "title", "") for i in app.menu]
+
+
+def test_exit_checking_restores_icon_and_menu(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon",
+                        lambda name: f"/tmp/{name}.png")
+    app.cfg["theme"] = "Purple"
+    app._checking = True
+    app._exit_checking()
+    assert app._checking is False
+    assert app.icon == "/tmp/Purple.png"
+    assert "Check now" in [getattr(i, "title", "") for i in app.menu]
+
+
+def test_exit_checking_without_icon_still_clears_flag(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
+    app.icon = "/tmp/keep.png"
+    app._checking = True
+    app._exit_checking()
+    assert app._checking is False
+    assert app.icon == "/tmp/keep.png"  # unchanged when no themed icon resolves
+
+
+def test_check_now_enters_checking_when_idle(app, app_mod, monkeypatch):
+    entered = {"v": False}
+    monkeypatch.setattr(app, "_enter_checking",
+                        lambda: entered.__setitem__("v", True))
+    monkeypatch.setattr(app, "on_tick", lambda _, manual=False: None)
+    app._polling = False
+    app.check_now(None)
+    assert entered["v"] is True
+
+
+def test_check_now_skips_enter_checking_when_polling(app, app_mod, monkeypatch):
+    entered = {"v": False}
+    monkeypatch.setattr(app, "_enter_checking",
+                        lambda: entered.__setitem__("v", True))
+    monkeypatch.setattr(app, "on_tick", lambda _, manual=False: None)
+    app._polling = True  # a check is already running
+    app.check_now(None)
+    assert entered["v"] is False
+
+
+def test_set_theme_uses_spinner_when_checking(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_checking_icon",
+                        lambda name: f"/tmp/{name}-checking.png")
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: f"/tmp/{name}.png")
+    app._checking = True
+
+    class Sender:
+        theme_name = "Yellow"
+
+    app._set_theme(Sender())
+    assert app.icon == "/tmp/Yellow-checking.png"
+
+
+def test_poll_once_manual_exits_checking_on_results(sync_app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        lambda cfg, log=None: [("jira", [])])
+    exited = {"v": False}
+    monkeypatch.setattr(sync_app, "_exit_checking",
+                        lambda: exited.__setitem__("v", True))
+    sync_app._checking = True
+    sync_app.state = {"seen": {}}
+    sync_app._poll_once(manual=True)
+    assert exited["v"] is True
+
+
+def test_poll_once_manual_exits_checking_on_unusable(sync_app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(False, ["configure first"]))
+    exited = {"v": False}
+    monkeypatch.setattr(sync_app, "_exit_checking",
+                        lambda: exited.__setitem__("v", True))
+    sync_app._checking = True
+    sync_app._poll_once(manual=True)
+    assert exited["v"] is True
+
+
+def test_poll_once_manual_exits_checking_on_error(sync_app, app_mod, monkeypatch):
+    app_mod.rumps._notifications_sent.clear()
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+
+    def boom(cfg, log=None):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all", boom)
+    exited = {"v": False}
+    monkeypatch.setattr(sync_app, "_exit_checking",
+                        lambda: exited.__setitem__("v", True))
+    sync_app._checking = True
+    sync_app._poll_once(manual=True)
+    assert exited["v"] is True
+    # Manual runs also surface a "Check failed" notification on error.
+    assert any("Check failed" in n["subtitle"]
+               for n in app_mod.rumps._notifications_sent)
+
+
+def test_poll_once_nonmanual_does_not_exit_checking(sync_app, app_mod, monkeypatch):
+    # A background (non-manual) tick must not touch the checking state.
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        lambda cfg, log=None: [("jira", [])])
+    exited = {"v": False}
+    monkeypatch.setattr(sync_app, "_exit_checking",
+                        lambda: exited.__setitem__("v", True))
+    sync_app._checking = False
+    sync_app.state = {"seen": {}}
+    sync_app._poll_once(manual=False)
+    assert exited["v"] is False
+
+
+def test_build_menu_shows_checking_item_when_busy(app, app_mod):
+    app._checking = True
+    app._build_menu()
+    first = app.menu[0]
+    assert first.title == "Checking…"
+    # The busy hint is non-interactive.
+    assert first.callback is None

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Dev Notifier "checking" (busy) icon template.
+  Matches the main icon's visual language — themed glow + pulse rings — but
+  replaces the lightning bolt with a spinner arc so it reads as "working".
+  Colors are placeholders substituted per theme by scripts/generate_icon.py:
+    {C1} = primary/lighter gradient stop
+    {C2} = secondary/darker gradient stop
+    {C3} = mid gradient stop
+    {GLOW} = outer glow / ring color
+-->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="arcGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="{C1}"/>
+      <stop offset="50%" stop-color="{C3}"/>
+      <stop offset="100%" stop-color="{C2}"/>
+    </linearGradient>
+    <radialGradient id="bgGrad" cx="50%" cy="42%" r="65%">
+      <stop offset="0%" stop-color="{C1}" stop-opacity="0.20"/>
+      <stop offset="70%" stop-color="{C2}" stop-opacity="0.06"/>
+      <stop offset="100%" stop-color="{C2}" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- soft rounded background so the app icon reads well on any wallpaper -->
+  <rect x="96" y="96" width="832" height="832" rx="188"
+        fill="#0f172a"/>
+  <rect x="96" y="96" width="832" height="832" rx="188"
+        fill="url(#bgGrad)"/>
+
+  <!-- faint full track ring (same family as the main icon's pulse rings) -->
+  <circle cx="512" cy="512" r="248" fill="none"
+          stroke="{GLOW}" stroke-width="34" stroke-opacity="0.22"/>
+
+  <!-- spinner arc: ~300deg themed sweep with round caps, glowing -->
+  <g filter="url(#glow)">
+    <!-- arc from ~ -60deg sweeping clockwise ~300deg, drawn as two segments to
+         keep a clean gradient direction; endpoints leave a gap that reads as
+         a spinner. -->
+    <path d="M 700 300
+             A 248 248 0 1 1 380 316"
+          fill="none"
+          stroke="url(#arcGrad)"
+          stroke-width="52"
+          stroke-linecap="round"/>
+    <!-- leading dot at the arc head for extra "motion" cue -->
+    <circle cx="700" cy="300" r="30" fill="{C1}"/>
+  </g>
+</svg>
