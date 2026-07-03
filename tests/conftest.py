@@ -140,15 +140,35 @@ def fake_rumps():
     stub.notifications = lambda fn: fn  # decorator passthrough
     stub.quit_application = lambda *a, **k: None
 
-    saved = sys.modules.get("rumps")
+    # notifier_app imports ``from PyObjCTools import AppHelper`` (macOS/PyObjC
+    # only) to marshal worker-thread results onto the main run loop. PyObjC is
+    # not installed on Linux CI, so stub it too. ``callAfter`` runs the callback
+    # synchronously here, which is what the tests want (deterministic, no loop).
+    pyobjctools = types.ModuleType("PyObjCTools")
+    apphelper = types.ModuleType("PyObjCTools.AppHelper")
+
+    def _call_after(fn, *args):
+        fn(*args)
+
+    apphelper.callAfter = _call_after
+    pyobjctools.AppHelper = apphelper
+
+    saved_rumps = sys.modules.get("rumps")
+    saved_pot = sys.modules.get("PyObjCTools")
+    saved_ah = sys.modules.get("PyObjCTools.AppHelper")
     sys.modules["rumps"] = stub
+    sys.modules["PyObjCTools"] = pyobjctools
+    sys.modules["PyObjCTools.AppHelper"] = apphelper
     # Drop a previously imported notifier_app so it re-imports against the stub.
     sys.modules.pop("notifier_app", None)
     try:
         yield stub
     finally:
-        if saved is not None:
-            sys.modules["rumps"] = saved
-        else:
-            sys.modules.pop("rumps", None)
+        for name, saved in (("rumps", saved_rumps),
+                            ("PyObjCTools", saved_pot),
+                            ("PyObjCTools.AppHelper", saved_ah)):
+            if saved is not None:
+                sys.modules[name] = saved
+            else:
+                sys.modules.pop(name, None)
         sys.modules.pop("notifier_app", None)

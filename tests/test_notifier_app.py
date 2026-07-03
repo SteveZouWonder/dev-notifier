@@ -429,17 +429,11 @@ def test_toggle_login_item(app, app_mod, monkeypatch):
 
 
 def test_run_on_main_executes_fn(app):
-    # _run_on_main schedules fn on a Timer; with the fake Timer we invoke the
-    # scheduled callback directly to prove it runs fn once.
+    # _run_on_main marshals fn onto the main run loop via AppHelper.callAfter.
+    # The stubbed callAfter runs it synchronously, so fn must have executed.
     ran = {"done": False}
     app._run_on_main(lambda _t: ran.__setitem__("done", True))
-    # The fake Timer stored the lambda passed to rumps.Timer(...).
-    # Simulate the event loop firing it.
-    timer_cb = app._last_timer_cb if hasattr(app, "_last_timer_cb") else None
-    # Fallback: just call the fn to assert it is callable.
-    if timer_cb:
-        timer_cb(None)
-    assert ran["done"] in (True, False)
+    assert ran["done"] is True
 
 
 def test_warn_if_unmet_when_not_ok(app, app_mod):
