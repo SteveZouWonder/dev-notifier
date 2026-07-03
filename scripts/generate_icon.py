@@ -2,7 +2,8 @@
 
 For each theme it renders a colored PNG (used as the menu-bar icon) into
 ``assets/menubar/<theme>.png``, and builds ``assets/icon.icns`` (app bundle
-icon) from the default theme.
+icon) plus ``assets/app-icon.png`` (a 512px PNG for the README) from the
+default theme.
 
 SVG -> PNG uses ``rsvg-convert`` (librsvg) if available, otherwise falls back
 to macOS ``qlmanage``. PNG -> icns uses ``iconutil`` + ``sips`` (macOS builtin).
@@ -35,6 +36,8 @@ DEFAULT_THEME = "Orange"
 
 # menu-bar icons render small; 44px looks crisp on retina.
 MENUBAR_PX = 44
+# README/app-icon PNG; 512px is sharp for the README header and any web use.
+APP_ICON_PX = 512
 
 
 def _render_svg_to_png(svg_path: Path, png_path: Path, px: int) -> None:
@@ -106,10 +109,13 @@ def main() -> None:
                 cpng = MENUBAR_DIR / f"{theme}-checking.png"
                 _render_svg_to_png(csvg, cpng, MENUBAR_PX)
                 print(f"menu-bar icon: {cpng}")
-        # app icon from default theme
+        # app icon from default theme (bundle .icns + a PNG for the README)
         default_svg = _themed_svg(DEFAULT_THEME, tmp)
         _build_icns(default_svg, ASSETS / "icon.icns", tmp)
         print(f"app icon: {ASSETS / 'icon.icns'}")
+        app_png = ASSETS / "app-icon.png"
+        _render_svg_to_png(default_svg, app_png, APP_ICON_PX)
+        print(f"app icon png: {app_png}")
 
 
 if __name__ == "__main__":

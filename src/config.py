@@ -39,12 +39,13 @@ DEFAULT_CONFIG = {
     },
     "poll": {
         "interval_seconds": 300,
-        "window_minutes": 10,
+        "window_minutes": 1440,
         "max_window_minutes": 10080,
         "_comment": "window_minutes is the fallback lookback on first run (no "
-                    "prior poll). Normally the window spans from the previous "
-                    "poll to now, capped at max_window_minutes (default 7 days) "
-                    "so a long sleep/shutdown doesn't fetch an unbounded backlog.",
+                    "prior poll; default 24h). Normally the window spans from "
+                    "the previous poll to now, capped at max_window_minutes "
+                    "(default 7 days) so a long sleep/shutdown doesn't fetch an "
+                    "unbounded backlog.",
     },
     "update": {
         "enabled": True,
