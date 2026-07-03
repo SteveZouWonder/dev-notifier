@@ -32,6 +32,12 @@ DEFAULT_CONFIG = {
         "interval_seconds": 300,
         "window_minutes": 10,
     },
+    "update": {
+        "enabled": True,
+        "check_interval_hours": 24,
+        "skipped_version": "",
+        "_comment": "Auto-check GitHub Releases for a newer version. skipped_version hides a version you dismissed.",
+    },
     "theme": "Orange",
     "_theme_options": "Orange | Green | Purple | Rainbow | Yellow (also switchable from the menu)",
 }

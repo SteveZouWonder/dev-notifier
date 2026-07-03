@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+### Added
+- automatic update checks against GitHub Releases: menu-bar prompt + clickable notification when a newer version is available, with one-click download (SHA-256 verified) that opens the DMG to install; "Check for updates" and "Skip this version" menu actions
+
 ## [v1.3.0] - 2026-07-01
 
 ### Fixed
