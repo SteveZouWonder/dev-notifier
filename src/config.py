@@ -28,6 +28,15 @@ DEFAULT_CONFIG = {
         "login": "",
         "_comment": "Leave login blank to auto-detect via the gh CLI (gh api user).",
     },
+    "pagerduty": {
+        "enabled": False,
+        "api_token": "",
+        "user_id": "",
+        "team_ids": [],
+        "_comment": "User API token: My Profile > User Settings > API Access > "
+                    "Create API User Token. Leave user_id / team_ids blank to "
+                    "auto-detect the current user and their teams via /users/me.",
+    },
     "poll": {
         "interval_seconds": 300,
         "window_minutes": 10,
@@ -67,7 +76,9 @@ def is_configured(cfg: dict) -> bool:
         and "your-domain" not in jira.get("base_url", "")
     )
     github_ok = cfg.get("github", {}).get("enabled")
-    return bool(jira_ok or github_ok)
+    pd = cfg.get("pagerduty", {})
+    pagerduty_ok = pd.get("enabled") and pd.get("api_token")
+    return bool(jira_ok or github_ok or pagerduty_ok)
 
 
 def config_path() -> Path:

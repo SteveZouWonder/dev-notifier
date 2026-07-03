@@ -110,6 +110,26 @@ def test_check_jira_not_configured(deps_mod, base, user, token):
 
 
 # ---------------------------------------------------------------------------
+# check_pagerduty
+# ---------------------------------------------------------------------------
+
+def test_check_pagerduty_disabled(deps_mod):
+    result = deps_mod.check_pagerduty({"pagerduty": {"enabled": False}})
+    assert result == {"enabled": False, "configured": False, "detail": "disabled"}
+
+
+def test_check_pagerduty_configured(deps_mod, sample_cfg):
+    result = deps_mod.check_pagerduty(sample_cfg)
+    assert result == {"enabled": True, "configured": True, "detail": "ok"}
+
+
+def test_check_pagerduty_missing_token(deps_mod):
+    cfg = {"pagerduty": {"enabled": True, "api_token": ""}}
+    result = deps_mod.check_pagerduty(cfg)
+    assert result["configured"] is False
+
+
+# ---------------------------------------------------------------------------
 # check_dependencies (aggregate)
 # ---------------------------------------------------------------------------
 
@@ -120,7 +140,31 @@ def test_check_dependencies_all_ok(deps_mod, monkeypatch, sample_cfg):
     assert status["ok"] is True
     assert status["github_ok"] is True
     assert status["jira_ok"] is True
+    assert status["pagerduty_ok"] is True
     assert status["problems"] == []
+
+
+def test_check_dependencies_pagerduty_only(deps_mod, monkeypatch):
+    # Only PagerDuty is usable -> overall ok via PagerDuty.
+    cfg = {"jira": {"enabled": False}, "github": {"enabled": False},
+           "pagerduty": {"enabled": True, "api_token": "tok"}}
+    monkeypatch.setattr(deps_mod, "check_gh", lambda: {
+        "installed": False, "authed": False, "login": "", "detail": "x"})
+    status = deps_mod.check_dependencies(cfg)
+    assert status["pagerduty_ok"] is True
+    assert status["ok"] is True
+    assert status["problems"] == []
+
+
+def test_check_dependencies_pagerduty_enabled_not_configured(deps_mod, monkeypatch):
+    cfg = {"jira": {"enabled": False}, "github": {"enabled": False},
+           "pagerduty": {"enabled": True, "api_token": ""}}
+    monkeypatch.setattr(deps_mod, "check_gh", lambda: {
+        "installed": False, "authed": False, "login": "", "detail": "x"})
+    status = deps_mod.check_dependencies(cfg)
+    assert status["ok"] is False
+    assert any("PagerDuty is enabled but not configured" in p
+               for p in status["problems"])
 
 
 def test_check_dependencies_github_not_installed(deps_mod, monkeypatch, sample_cfg):

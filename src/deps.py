@@ -96,13 +96,28 @@ def check_jira(cfg: dict) -> dict:
     }
 
 
+def check_pagerduty(cfg: dict) -> dict:
+    """Validate PagerDuty config presence (not a live API call)."""
+    pd = cfg.get("pagerduty", {})
+    if not pd.get("enabled"):
+        return {"enabled": False, "configured": False, "detail": "disabled"}
+    configured = bool(pd.get("api_token"))
+    return {
+        "enabled": True,
+        "configured": configured,
+        "detail": "ok" if configured else "add a PagerDuty user API token",
+    }
+
+
 def check_dependencies(cfg: dict) -> dict:
     """Aggregate status. `ok` is True when at least one source is usable."""
     gh = check_gh()
     jira = check_jira(cfg)
+    pagerduty = check_pagerduty(cfg)
     github_enabled = cfg.get("github", {}).get("enabled", False)
     github_ok = github_enabled and gh["installed"] and gh["authed"]
     jira_ok = jira["enabled"] and jira["configured"]
+    pagerduty_ok = pagerduty["enabled"] and pagerduty["configured"]
     problems = []
     if github_enabled and not gh["installed"]:
         problems.append("GitHub enabled but gh CLI is not installed "
@@ -112,12 +127,17 @@ def check_dependencies(cfg: dict) -> dict:
     if jira["enabled"] and not jira["configured"]:
         problems.append("Jira is enabled but not configured "
                         "(edit config: base_url / username / api_token)")
+    if pagerduty["enabled"] and not pagerduty["configured"]:
+        problems.append("PagerDuty is enabled but not configured "
+                        "(edit config: api_token)")
     return {
         "gh": gh,
         "jira": jira,
+        "pagerduty": pagerduty,
         "github_ok": github_ok,
         "jira_ok": jira_ok,
-        "ok": bool(github_ok or jira_ok),
+        "pagerduty_ok": pagerduty_ok,
+        "ok": bool(github_ok or jira_ok or pagerduty_ok),
         "problems": problems,
     }
 

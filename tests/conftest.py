@@ -39,6 +39,12 @@ def sample_cfg():
             "api_token": "secret-token",
         },
         "github": {"enabled": True, "login": "octocat"},
+        "pagerduty": {
+            "enabled": True,
+            "api_token": "pd-secret-token",
+            "user_id": "PUSER1",
+            "team_ids": ["PTEAM1"],
+        },
         "poll": {"interval_seconds": 300, "window_minutes": 10},
         "update": {
             "enabled": True,

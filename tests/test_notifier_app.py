@@ -341,6 +341,42 @@ def test_status_menuitem_needs_setup(app):
     assert any("Needs login" in t for t in child_titles)
 
 
+def test_status_menuitem_pagerduty_ready(app):
+    app.dep_status = {
+        "pending": False,
+        "jira_ok": False, "jira": {"enabled": False},
+        "github_ok": False, "pagerduty_ok": True,
+    }
+    app.cfg.setdefault("pagerduty", {})["enabled"] = True
+    item = app._status_menuitem()
+    child_titles = [c.title for c in item._children if hasattr(c, "title")]
+    assert any("PagerDuty: ✓ Ready" in t for t in child_titles)
+
+
+def test_status_menuitem_pagerduty_needs_token(app):
+    app.dep_status = {
+        "pending": False,
+        "jira_ok": False, "jira": {"enabled": False},
+        "github_ok": False, "pagerduty_ok": False,
+    }
+    app.cfg.setdefault("pagerduty", {})["enabled"] = True
+    item = app._status_menuitem()
+    child_titles = [c.title for c in item._children if hasattr(c, "title")]
+    assert any("PagerDuty: ⚠ Needs token" in t for t in child_titles)
+
+
+def test_status_menuitem_pagerduty_off(app):
+    app.dep_status = {
+        "pending": False,
+        "jira_ok": False, "jira": {"enabled": False},
+        "github_ok": False, "pagerduty_ok": False,
+    }
+    app.cfg.setdefault("pagerduty", {})["enabled"] = False
+    item = app._status_menuitem()
+    child_titles = [c.title for c in item._children if hasattr(c, "title")]
+    assert any("PagerDuty: Off" in t for t in child_titles)
+
+
 def test_update_menuitem_available(app):
     app.update_info = {"available": True, "latest": "2.0.0"}
     item = app._update_menuitem()
