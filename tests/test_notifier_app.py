@@ -10,6 +10,7 @@ a real event loop.
 import importlib
 import json
 import time
+import types
 
 import pytest
 
@@ -435,6 +436,24 @@ def test_post_notification_explicit_icon_preserved(app, app_mod, monkeypatch):
     app._post_notification(title="t", subtitle="s", message="m", data={},
                            icon="/custom.png")
     assert app_mod.rumps._notifications_sent[-1]["icon"] == "/custom.png"
+
+
+def test_post_notification_follows_theme_switch(app, app_mod, monkeypatch):
+    """Switching the theme also switches the icon used for notifications."""
+    app_mod.rumps._notifications_sent.clear()
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: f"/icons/{t}.png")
+
+    def _switch(name):
+        sender = types.SimpleNamespace(theme_name=name)
+        app._set_theme(sender)
+
+    _switch("Purple")
+    app._post_notification(title="t", subtitle="s", message="m", data={})
+    assert app_mod.rumps._notifications_sent[-1]["icon"] == "/icons/Purple.png"
+
+    _switch("Green")
+    app._post_notification(title="t", subtitle="s", message="m", data={})
+    assert app_mod.rumps._notifications_sent[-1]["icon"] == "/icons/Green.png"
 
 
 def test_toggle_login_item(app, app_mod, monkeypatch):
