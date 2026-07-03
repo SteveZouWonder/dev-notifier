@@ -7,7 +7,7 @@ Build (from repo root):
 import os
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 PROJECT_ROOT = Path.cwd()
 APP_VERSION = os.environ.get("APP_VERSION", "0.0.0")
@@ -19,6 +19,11 @@ if _menubar.exists():
     datas.append((str(_menubar), "assets/menubar"))
 _icon = PROJECT_ROOT / "assets" / "icon.icns"
 app_icon = str(_icon) if _icon.exists() else None
+
+# Bundle certifi's CA bundle so Jira (and other https) TLS verification works
+# in the packaged app; the system Python's default store cannot verify some
+# public certificate chains (CERTIFICATE_VERIFY_FAILED).
+datas += collect_data_files("certifi")
 
 hiddenimports = collect_submodules("rumps")
 # notifier_app imports PyObjCTools.AppHelper to marshal worker-thread results

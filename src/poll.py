@@ -9,6 +9,7 @@ the ``gh`` CLI for GitHub (so no GitHub token is stored).
 import base64
 import json
 import re
+import ssl
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,26 @@ import deps as _deps
 def _log(msg: str) -> None:
     # Lazy import to avoid a hard dependency loop; app wires real logging.
     print(msg)
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Return an SSL context that can verify public CAs.
+
+    The stock macOS ``python.org`` / system Python does not read the system
+    keychain, so ``urlopen`` falls back to a CA bundle that often cannot verify
+    Atlassian/PagerDuty certificate chains (CERTIFICATE_VERIFY_FAILED). Prefer
+    ``certifi``'s bundle when available; otherwise use the default context so
+    packaged/CI environments without certifi still work.
+    """
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001 - certifi missing or unreadable bundle
+        return ssl.create_default_context()
+
+
+_SSL_CTX = _ssl_context()
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +73,7 @@ def _jira_search(cfg: dict, window_min: int) -> list:
         "Content-Type": "application/json",
     })
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode()).get("issues", [])
     except Exception as e:  # noqa: BLE001
         _log(f"ERROR jira_search: {e}")
@@ -251,7 +272,7 @@ def _pd_get(token: str, path: str, params=None):
         "Content-Type": "application/json",
     })
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:  # noqa: BLE001
         _log(f"ERROR pagerduty GET {path}: {e}")

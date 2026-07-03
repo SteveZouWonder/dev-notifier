@@ -151,6 +151,44 @@ def test_jira_search_missing_creds_returns_empty(poll_mod):
     assert poll_mod._jira_search(cfg, 10) == []
 
 
+def test_ssl_context_uses_certifi_bundle(poll_mod, monkeypatch):
+    import ssl as _ssl
+
+    captured = {}
+
+    def fake_create(*a, **k):
+        captured["cafile"] = k.get("cafile")
+        return "CTX"
+
+    monkeypatch.setattr(poll_mod.ssl, "create_default_context", fake_create)
+    # certifi is available in the test env; the bundle path should be passed.
+    assert poll_mod._ssl_context() == "CTX"
+    assert captured["cafile"] and captured["cafile"].endswith("cacert.pem")
+
+
+def test_ssl_context_falls_back_without_certifi(poll_mod, monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_certifi(name, *a, **k):
+        if name == "certifi":
+            raise ImportError("no certifi")
+        return real_import(name, *a, **k)
+
+    calls = []
+
+    def fake_create(*a, **k):
+        calls.append(k)
+        return "DEFAULT_CTX"
+
+    monkeypatch.setattr(builtins, "__import__", no_certifi)
+    monkeypatch.setattr(poll_mod.ssl, "create_default_context", fake_create)
+    assert poll_mod._ssl_context() == "DEFAULT_CTX"
+    # Fallback path: called with no cafile kwarg.
+    assert calls == [{}]
+
+
 def test_jira_search_swallows_network_error(poll_mod, monkeypatch, sample_cfg):
     def boom(*a, **k):
         raise OSError("network down")
