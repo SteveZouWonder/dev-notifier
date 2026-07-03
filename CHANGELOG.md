@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - desktop notifications now show the active theme's colored icon instead of the plain default app icon
 
 ### Fixed
+- Jira (and PagerDuty) notifications never arriving because every API request failed TLS verification (`CERTIFICATE_VERIFY_FAILED`) on the stock macOS Python; requests now use the `certifi` CA bundle, which is bundled into the packaged app
 - manual checks producing no notifications at all: poll results were scheduled onto the main thread with an NSTimer started from a worker thread, which never fired and silently dropped every result; results are now marshalled via `AppHelper.callAfter`
 - surface a "Check failed" notification when a manual check errors, instead of failing silently
 
