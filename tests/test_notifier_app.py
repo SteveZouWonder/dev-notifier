@@ -687,12 +687,31 @@ def test_poll_once_processes_new_items(sync_app, app_mod, monkeypatch):
     items = [{"fp": "jira:1", "title": "Jira", "subtitle": "ACME-1 · Open",
               "message": "updated", "url": "https://x"}]
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None: [("jira", items)])
+                        lambda cfg, log=None, since_ts=None: [("jira", items)])
     sync_app.state = {"seen": {}}
     sync_app._poll_once(manual=False)
     # The new item became a recent entry and was marked seen.
     assert sync_app.recent and sync_app.recent[0]["url"] == "https://x"
     assert "jira:1" in sync_app.state["seen"]
+    # A successful poll advances the cursor used for the next dynamic window.
+    assert isinstance(sync_app.state.get("last_poll"), float)
+
+
+def test_poll_once_passes_last_poll_as_since(sync_app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+    captured = {}
+
+    def fake_collect(cfg, log=None, since_ts=None):
+        captured["since_ts"] = since_ts
+        return [("jira", [])]
+
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all", fake_collect)
+    sync_app.state = {"seen": {}, "last_poll": 12345.0}
+    sync_app._poll_once(manual=False)
+    # The stored last_poll timestamp is handed to collect_all as the window start.
+    assert captured["since_ts"] == 12345.0
 
 
 def test_poll_once_skips_passing_ci(sync_app, app_mod, monkeypatch):
@@ -702,7 +721,7 @@ def test_poll_once_skips_passing_ci(sync_app, app_mod, monkeypatch):
     items = [{"fp": "ci:1", "title": "GitHub CI", "subtitle": "s",
               "message": "m", "url": "u", "ci_only": True, "ci_rollup": "pass"}]
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None: [("ci", items)])
+                        lambda cfg, log=None, since_ts=None: [("ci", items)])
     sync_app.state = {"seen": {}}
     sync_app.recent = []
     sync_app._poll_once(manual=False)
@@ -716,7 +735,7 @@ def test_poll_once_collect_all_error(sync_app, app_mod, monkeypatch):
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
 
-    def boom(cfg, log=None):
+    def boom(cfg, log=None, since_ts=None):
         raise RuntimeError("collect failed")
 
     monkeypatch.setattr(app_mod.poll_mod, "collect_all", boom)
@@ -788,7 +807,7 @@ def test_poll_once_manual_no_new_items_notifies(sync_app, app_mod, monkeypatch):
                         lambda cfg: _full_dep_status(True, []))
     # Item already seen -> no new items -> manual run reports "all caught up".
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None: [("jira", [
+                        lambda cfg, log=None, since_ts=None: [("jira", [
                             {"fp": "seen:1", "title": "Jira", "subtitle": "s",
                              "message": "m", "url": "u"}])])
     sync_app.state = {"seen": {"seen:1": 111.0}}
@@ -894,7 +913,7 @@ def test_poll_once_manual_exits_checking_on_results(sync_app, app_mod, monkeypat
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None: [("jira", [])])
+                        lambda cfg, log=None, since_ts=None: [("jira", [])])
     exited = {"v": False}
     monkeypatch.setattr(sync_app, "_exit_checking",
                         lambda: exited.__setitem__("v", True))
@@ -922,7 +941,7 @@ def test_poll_once_manual_exits_checking_on_error(sync_app, app_mod, monkeypatch
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
 
-    def boom(cfg, log=None):
+    def boom(cfg, log=None, since_ts=None):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(app_mod.poll_mod, "collect_all", boom)
@@ -943,7 +962,7 @@ def test_poll_once_nonmanual_does_not_exit_checking(sync_app, app_mod, monkeypat
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None: [("jira", [])])
+                        lambda cfg, log=None, since_ts=None: [("jira", [])])
     exited = {"v": False}
     monkeypatch.setattr(sync_app, "_exit_checking",
                         lambda: exited.__setitem__("v", True))

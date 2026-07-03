@@ -364,16 +364,42 @@ def pagerduty_items(cfg: dict, window_min: int) -> list:
     return items
 
 
-def collect_all(cfg: dict, log=None):
+def resolve_window_minutes(cfg: dict, since_ts=None, now_ts=None) -> int:
+    """Compute the lookback window (in minutes) for this poll.
+
+    The window normally spans from the previous poll (``since_ts``, epoch
+    seconds) to ``now``, so no update between polls is ever missed regardless of
+    the poll interval. It is capped at ``poll.max_window_minutes`` (default 7
+    days) so a long sleep/shutdown doesn't fetch an unbounded backlog. When
+    ``since_ts`` is missing (first run), fall back to ``poll.window_minutes``.
+    """
+    poll_cfg = cfg.get("poll", {})
+    fallback = poll_cfg.get("window_minutes", 10)
+    cap = poll_cfg.get("max_window_minutes", 10080)
+    if not since_ts:
+        span = fallback
+    else:
+        now_ts = now_ts if now_ts is not None else datetime.now(timezone.utc).timestamp()
+        span = (now_ts - since_ts) / 60.0
+        if span < 1:
+            span = 1  # never look back less than a minute (clock jitter)
+    window = min(span, cap)
+    return int(round(window))
+
+
+def collect_all(cfg: dict, log=None, since_ts=None):
     """Yield item lists in priority order (fast sources first).
 
     Returns a list of (phase_name, items) so the caller can notify
-    incrementally. `log` is an optional callable(str).
+    incrementally. `log` is an optional callable(str). `since_ts` is the epoch
+    timestamp of the previous poll; the lookback window spans from it to now
+    (capped by ``poll.max_window_minutes``). See ``resolve_window_minutes``.
     """
     global _log
     if log:
         _log = log
-    window_min = cfg.get("poll", {}).get("window_minutes", 10)
+    window_min = resolve_window_minutes(cfg, since_ts)
+    _log(f"poll window: {window_min} min")
     login = gh_login(cfg)
     return [
         ("jira", jira_items(cfg, window_min)),

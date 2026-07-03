@@ -612,8 +612,13 @@ class NotifierApp(rumps.App):
             return
 
         _log("=== poll start ===")
+        # Window spans from the previous poll to now (capped by
+        # max_window_minutes). Snapshot the start time *before* fetching so any
+        # update that lands during this poll is caught by the next one.
+        since_ts = self.state.get("last_poll")
+        poll_started = time.time()
         try:
-            phases = poll_mod.collect_all(cfg, log=_log)
+            phases = poll_mod.collect_all(cfg, log=_log, since_ts=since_ts)
         except Exception as e:  # noqa: BLE001
             _log(f"ERROR collect_all: {e}")
 
@@ -658,6 +663,9 @@ class NotifierApp(rumps.App):
                     seen[fp] = time.time()
                     new_count += 1
             self.recent = self.recent[:10]
+            # Advance the poll cursor only after a successful fetch so the next
+            # window starts where this one began (no gap, no missed updates).
+            self.state["last_poll"] = poll_started
             _save_state(self.state)
             if manual and self._checking:
                 self._exit_checking()  # restores icon + rebuilds menu

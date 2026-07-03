@@ -393,6 +393,60 @@ def test_collect_all_wires_custom_logger(poll_mod, monkeypatch, sample_cfg):
     assert "hello" in captured
 
 
+def test_collect_all_passes_dynamic_window(poll_mod, monkeypatch, sample_cfg):
+    # since_ts is turned into a lookback window and handed to the sources.
+    seen = {}
+    monkeypatch.setattr(poll_mod, "jira_items", lambda cfg, w: seen.setdefault("jira", w) or [])
+    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg: [])
+    monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
+    monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: seen.setdefault("pd", w) or [])
+
+    import time
+    poll_mod.collect_all(sample_cfg, since_ts=time.time() - 25 * 60)
+    # ~25 minutes since the last poll -> both sources get the same window.
+    assert seen["jira"] == 25
+    assert seen["pd"] == 25
+
+
+# ---------------------------------------------------------------------------
+# resolve_window_minutes (dynamic poll window)
+# ---------------------------------------------------------------------------
+
+def test_resolve_window_falls_back_without_since(poll_mod):
+    cfg = {"poll": {"window_minutes": 10, "max_window_minutes": 10080}}
+    assert poll_mod.resolve_window_minutes(cfg, since_ts=None) == 10
+
+
+def test_resolve_window_spans_last_poll_to_now(poll_mod):
+    cfg = {"poll": {"window_minutes": 10, "max_window_minutes": 10080}}
+    now = 1_000_000.0
+    # 42 minutes ago.
+    assert poll_mod.resolve_window_minutes(
+        cfg, since_ts=now - 42 * 60, now_ts=now) == 42
+
+
+def test_resolve_window_capped_at_max(poll_mod):
+    cfg = {"poll": {"window_minutes": 10, "max_window_minutes": 60}}
+    now = 1_000_000.0
+    # 5 hours ago, but capped at 60 minutes.
+    assert poll_mod.resolve_window_minutes(
+        cfg, since_ts=now - 5 * 3600, now_ts=now) == 60
+
+
+def test_resolve_window_floor_of_one_minute(poll_mod):
+    cfg = {"poll": {"window_minutes": 10, "max_window_minutes": 10080}}
+    now = 1_000_000.0
+    # A poll just seconds ago (or slight clock skew) still looks back >= 1 min.
+    assert poll_mod.resolve_window_minutes(
+        cfg, since_ts=now - 5, now_ts=now) == 1
+
+
+def test_resolve_window_uses_defaults_when_poll_cfg_absent(poll_mod):
+    # No poll section at all: defaults (10 fallback, 10080 cap) apply.
+    assert poll_mod.resolve_window_minutes({}, since_ts=None) == 10
+
+
 # ---------------------------------------------------------------------------
 # gh_ci_fallback
 # ---------------------------------------------------------------------------
