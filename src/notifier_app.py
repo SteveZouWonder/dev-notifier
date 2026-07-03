@@ -225,12 +225,12 @@ class NotifierApp(rumps.App):
                     else:
                         sub, msg = "Up to date", \
                             f"You're on the latest version ({info['current']})."
-                    rumps.notification(
+                    self._post_notification(
                         title="Dev Notifier — updates",
                         subtitle=sub, message=msg, data={}, sound=False,
                     )
                 elif notify and info.get("available"):
-                    rumps.notification(
+                    self._post_notification(
                         title="Dev Notifier — update available",
                         subtitle=f"Version {info['latest']} is available",
                         message="Open the menu to download and install.",
@@ -245,7 +245,7 @@ class NotifierApp(rumps.App):
     def _download_update(self, _):
         """Download + verify the DMG, then open it (all off the main thread)."""
         if self._downloading:
-            rumps.notification(
+            self._post_notification(
                 title="Dev Notifier", subtitle="Already downloading…",
                 message="The update download is already in progress.",
                 data={}, sound=False,
@@ -253,7 +253,7 @@ class NotifierApp(rumps.App):
             return
         self._downloading = True
         info = dict(self.update_info)
-        rumps.notification(
+        self._post_notification(
             title="Dev Notifier", subtitle="Downloading update…",
             message=f"Fetching version {info.get('latest', '')}.",
             data={}, sound=False,
@@ -267,7 +267,7 @@ class NotifierApp(rumps.App):
 
             def apply(_):
                 if result.get("ok"):
-                    rumps.notification(
+                    self._post_notification(
                         title="Dev Notifier — update ready",
                         subtitle="Installer opened",
                         message="Drag DevNotifier into Applications to replace "
@@ -275,7 +275,7 @@ class NotifierApp(rumps.App):
                         data={}, sound=True,
                     )
                 else:
-                    rumps.notification(
+                    self._post_notification(
                         title="Dev Notifier — update failed",
                         subtitle="Could not download",
                         message=result.get("error", "Try the Releases page.")[:200],
@@ -330,13 +330,27 @@ class NotifierApp(rumps.App):
             self.icon = icon
         self._build_menu()
 
+    def _post_notification(self, **kwargs):
+        """Post a native notification using the active theme's colored icon.
+
+        rumps replaces the default (app bundle) notification icon with the
+        image passed via ``icon=`` (NSUserNotification's identity image), so
+        notifications match the menu-bar theme instead of a plain square.
+        """
+        if "icon" not in kwargs:
+            theme = self.cfg.get("theme", DEFAULT_THEME)
+            icon = _theme_icon(theme)
+            if icon:
+                kwargs["icon"] = icon
+        rumps.notification(**kwargs)
+
     def _warn_if_unmet(self):
         """On startup, if nothing is usable, guide the user via a notification."""
         if not self.dep_status.get("ok"):
             msg = self.dep_status["problems"][0] if self.dep_status["problems"] \
                 else "Open config file to set up Jira/GitHub."
             try:
-                rumps.notification(
+                self._post_notification(
                     title="Dev Notifier — setup needed",
                     subtitle="No working source yet",
                     message=msg,
@@ -435,14 +449,14 @@ class NotifierApp(rumps.App):
                 self.dep_status = status
                 self._build_menu()
                 if status["problems"]:
-                    rumps.notification(
+                    self._post_notification(
                         title="Dev Notifier — dependency check",
                         subtitle="Issues found",
                         message="; ".join(status["problems"])[:200],
                         data={}, sound=False,
                     )
                 else:
-                    rumps.notification(
+                    self._post_notification(
                         title="Dev Notifier — dependency check",
                         subtitle="All good",
                         message="Jira / GitHub are ready.",
@@ -545,7 +559,7 @@ class NotifierApp(rumps.App):
             # A previous poll is still running (slow network). Skip overlapping
             # runs; on a manual trigger, tell the user it's already working.
             if manual:
-                rumps.notification(
+                self._post_notification(
                     title="Dev Notifier",
                     subtitle="Already checking…",
                     message="A check is already in progress.",
@@ -576,7 +590,7 @@ class NotifierApp(rumps.App):
                     self._exit_checking()  # restores icon + rebuilds menu
                 else:
                     self._build_menu()
-                    rumps.notification(
+                    self._post_notification(
                         title="Dev Notifier",
                         subtitle="Nothing to check",
                         message=(dep_status["problems"][0]
@@ -598,7 +612,7 @@ class NotifierApp(rumps.App):
                 if manual and self._checking:
                     self._exit_checking()
                 if manual:
-                    rumps.notification(
+                    self._post_notification(
                         title="Dev Notifier",
                         subtitle="Check failed",
                         message=f"Could not fetch updates: {e}"[:200],
@@ -642,7 +656,7 @@ class NotifierApp(rumps.App):
                 self._build_menu()
             _log(f"=== poll done: {new_count} new ===")
             if manual and new_count == 0:
-                rumps.notification(
+                self._post_notification(
                     title="Dev Notifier",
                     subtitle="Checked — no new items",
                     message="You're all caught up.",
@@ -656,7 +670,7 @@ class NotifierApp(rumps.App):
         _log(f"NOTIFY [{it['title']}] {it['subtitle']} | {it['message']} -> {url}")
         # Notify only; clicking the notification opens the URL (see _on_click).
         try:
-            rumps.notification(
+            self._post_notification(
                 title=it["title"],
                 subtitle=it["subtitle"],
                 message=it["message"],
