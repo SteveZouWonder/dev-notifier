@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+### Changed
+- poll lookback is now dynamic: each poll records its timestamp and the next poll's window spans from the previous poll to now, so no Jira/GitHub/PagerDuty update between polls is missed regardless of the poll interval. The window is capped by the new configurable `poll.max_window_minutes` (default 7 days) so a long sleep/shutdown doesn't fetch an unbounded backlog; `poll.window_minutes` is now only the first-run fallback
+
 ## [v1.5.0] - 2026-07-03
 
 ### Added
