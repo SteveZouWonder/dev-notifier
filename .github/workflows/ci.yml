@@ -1,0 +1,207 @@
+name: CI/CD Pipeline
+
+# Mirrors the pipeline style of the reference project
+# (SteveZouWonder/ollama-qwen-coder-rag-lib-agent): syntax check, lint, security
+# scan, dependency audit, unit tests with coverage, and report artifacts.
+#
+# This project ships a macOS menu-bar app whose UI layer depends on rumps
+# (AppKit/PyObjC, macOS only). rumps cannot be imported on Linux, so the test
+# stage is split:
+#   - build-and-test : ubuntu, across Python 3.9-3.12. Runs every test except
+#                      the `macos`-marked ones (rumps is stubbed by the
+#                      fake_rumps fixture, so notifier_app's logic is covered).
+#   - test-macos     : macos-latest with real rumps installed, full suite.
+#   - security-scan  : independent pip-audit gate for known CVEs.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        # rumps is macOS-only, so on Linux we install the test tooling and the
+        # (non-rumps) test requirements; notifier_app is exercised via the
+        # fake_rumps stub in the suite.
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 pylint bandit pip-audit pytest pytest-cov
+
+      - name: Code syntax check with Python compiler
+        run: |
+          git ls-files '*.py' | xargs -r python -m py_compile
+          echo "✅ Python syntax check passed"
+
+      - name: Lint with flake8
+        run: |
+          # Stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics --exclude=venv,.venv,build,dist
+          # Exit-zero treats all other findings as warnings
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics --exclude=venv,.venv,build,dist
+        continue-on-error: true
+
+      - name: Lint with pylint
+        run: |
+          git ls-files 'src/*.py' 'scripts/*.py' 'launcher.py' | xargs -r pylint --exit-zero --output-format=text
+        continue-on-error: true
+
+      - name: Security check with bandit
+        run: |
+          bandit -r src scripts launcher.py -f json -o bandit-report.json || true
+          bandit -r src scripts launcher.py -lll -i
+        continue-on-error: false
+
+      - name: Check for known dependency vulnerabilities with pip-audit
+        run: |
+          pip-audit --requirement requirements.txt --format json --output pip-audit-report.json || true
+          pip-audit --requirement requirements.txt || echo "⚠️ Some security vulnerabilities found, please review"
+        continue-on-error: true
+
+      - name: Run tests with pytest (exclude macOS-only)
+        # rumps-dependent tests are skipped on Linux; the fake_rumps fixture
+        # still covers notifier_app's pure logic. Coverage is measured over the
+        # app source (see pytest.ini / .coveragerc).
+        run: |
+          pytest tests/ -m "not macos" -v \
+            --cov=src --cov=bump_changelog \
+            --cov-report=xml --cov-report=term-missing --cov-report=html
+
+      - name: Check test coverage
+        run: |
+          coverage report --fail-under=95
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v4
+        if: success()
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+      - name: Upload security reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-reports-py${{ matrix.python-version }}
+          path: |
+            bandit-report.json
+            pip-audit-report.json
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-reports-py${{ matrix.python-version }}
+          path: |
+            coverage.xml
+            htmlcov/
+
+      - name: Summary of results
+        if: always()
+        run: |
+          echo "## 🎯 CI/CD Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Completed Steps" >> $GITHUB_STEP_SUMMARY
+          echo "- Python syntax check" >> $GITHUB_STEP_SUMMARY
+          echo "- Code linting (flake8, pylint)" >> $GITHUB_STEP_SUMMARY
+          echo "- Security scanning (bandit)" >> $GITHUB_STEP_SUMMARY
+          echo "- Dependency audit (pip-audit)" >> $GITHUB_STEP_SUMMARY
+          echo "- Test execution with coverage (Python ${{ matrix.python-version }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "- Security reports uploaded" >> $GITHUB_STEP_SUMMARY
+          echo "- Coverage reports uploaded" >> $GITHUB_STEP_SUMMARY
+
+  test-macos:
+    # Full suite with the real rumps dependency, which only imports on macOS.
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies (with rumps)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt
+
+      - name: Run full test suite with coverage
+        run: |
+          pytest tests/ -v \
+            --cov=src --cov=bump_changelog \
+            --cov-report=term-missing --cov-fail-under=95
+
+  security-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          pip install pip-audit
+
+      - name: Run pip-audit for known vulnerabilities
+        run: |
+          pip-audit --requirement requirements.txt --format json --output pip-audit-check.json || true
+          echo "Checking for known vulnerabilities in dependencies..."
+          if [ -f pip-audit-check.json ]; then
+            vuln_count=$(python3 -c "import json, pathlib; data = json.loads(pathlib.Path('pip-audit-check.json').read_text(encoding='utf-8', errors='ignore') or '{}'); deps = data.get('dependencies', []) if isinstance(data, dict) else []; print(sum(len(d.get('vulns', [])) for d in deps if isinstance(d, dict)))")
+            if [ "$vuln_count" -gt 0 ]; then
+              echo "❌ Found $vuln_count known vulnerabilities in dependencies"
+              echo "Please review pip-audit-check.json for details"
+              cat pip-audit-check.json
+              exit 1
+            else
+              echo "✅ No known vulnerabilities found in dependencies"
+            fi
+          else
+            echo "⚠️ Could not parse pip-audit results"
+          fi
+        continue-on-error: false
+
+      - name: Upload pip-audit results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pip-audit-results
+          path: pip-audit-check.json

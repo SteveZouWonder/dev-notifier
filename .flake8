@@ -1,0 +1,24 @@
+[flake8]
+max-line-length = 127
+max-complexity = 10
+exclude =
+    .git,
+    __pycache__,
+    .pytest_cache,
+    .venv,
+    venv,
+    build,
+    dist,
+    *.egg-info,
+    .cache,
+    htmlcov,
+    .coverage
+# Ignored codes:
+#   E203 - whitespace before ':'
+#   E266 - too many '#' for block comment
+#   W503 - line break before binary operator
+#   E402 - module level import not at top of file (launcher.py sets sys.path first)
+extend-ignore = E203, E266, W503, E402
+per-file-ignores =
+    __init__.py:F401
+    tests/*:S101
