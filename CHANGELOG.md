@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.4.0] - 2026-07-03
+
 ### Added
 - PagerDuty as a notification source (REST API v2): notifies on incidents assigned to you (triggered/acknowledged) and on your teams' incidents changed within the poll window, so status changes (acknowledge/resolve/escalate) resurface; configure a user API token in `config.json` (leave `user_id`/`team_ids` blank to auto-detect via `/users/me`). A "PagerDuty" line is shown in the Status menu.
 - automatic update checks against GitHub Releases: menu-bar prompt + clickable notification when a newer version is available, with one-click download (SHA-256 verified) that opens the DMG to install; "Check for updates" and "Skip this version" menu actions
