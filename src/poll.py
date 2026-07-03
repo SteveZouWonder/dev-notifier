@@ -371,10 +371,11 @@ def resolve_window_minutes(cfg: dict, since_ts=None, now_ts=None) -> int:
     seconds) to ``now``, so no update between polls is ever missed regardless of
     the poll interval. It is capped at ``poll.max_window_minutes`` (default 7
     days) so a long sleep/shutdown doesn't fetch an unbounded backlog. When
-    ``since_ts`` is missing (first run), fall back to ``poll.window_minutes``.
+    ``since_ts`` is missing (first run), fall back to ``poll.window_minutes``
+    (default 24 hours).
     """
     poll_cfg = cfg.get("poll", {})
-    fallback = poll_cfg.get("window_minutes", 10)
+    fallback = poll_cfg.get("window_minutes", 1440)
     cap = poll_cfg.get("max_window_minutes", 10080)
     if not since_ts:
         span = fallback

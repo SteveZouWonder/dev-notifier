@@ -443,8 +443,8 @@ def test_resolve_window_floor_of_one_minute(poll_mod):
 
 
 def test_resolve_window_uses_defaults_when_poll_cfg_absent(poll_mod):
-    # No poll section at all: defaults (10 fallback, 10080 cap) apply.
-    assert poll_mod.resolve_window_minutes({}, since_ts=None) == 10
+    # No poll section at all: defaults (1440 fallback = 24h, 10080 cap) apply.
+    assert poll_mod.resolve_window_minutes({}, since_ts=None) == 1440
 
 
 # ---------------------------------------------------------------------------
