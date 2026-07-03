@@ -226,6 +226,123 @@ def gh_ci_fallback(cfg: dict, login: str) -> list:
     return items
 
 
+# ---------------------------------------------------------------------------
+# PagerDuty (REST API v2)
+# ---------------------------------------------------------------------------
+
+_PD_API = "https://api.pagerduty.com"
+_PD_ACTIVE_STATUSES = ("triggered", "acknowledged")
+
+
+def _pd_get(token: str, path: str, params=None):
+    """GET a PagerDuty REST API v2 endpoint; return the parsed JSON dict.
+
+    ``params`` is a list of (key, value) pairs (list allows repeated keys such
+    as ``user_ids[]``). Returns ``{}`` on any network/parse error.
+    """
+    from urllib.parse import urlencode
+
+    url = f"{_PD_API}{path}"
+    if params:
+        url = f"{url}?{urlencode(params)}"
+    req = urllib.request.Request(url, method="GET", headers={
+        "Authorization": f"Token token={token}",
+        "Accept": "application/vnd.pagerduty+json;version=2",
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:  # noqa: BLE001
+        _log(f"ERROR pagerduty GET {path}: {e}")
+        return {}
+
+
+def pd_identity(cfg: dict):
+    """Resolve (user_id, team_ids) for PagerDuty.
+
+    Uses configured values when present; otherwise auto-detects the current
+    user and their teams via ``GET /users/me``. Returns ("", []) on failure.
+    """
+    pd = cfg.get("pagerduty", {})
+    token = pd.get("api_token", "")
+    user_id = pd.get("user_id", "")
+    team_ids = list(pd.get("team_ids", []) or [])
+    if user_id and team_ids:
+        return user_id, team_ids
+    if not token:
+        return user_id, team_ids
+    me = (_pd_get(token, "/users/me") or {}).get("user", {})
+    if not user_id:
+        user_id = me.get("id", "")
+    if not team_ids:
+        team_ids = [t.get("id", "") for t in me.get("teams", []) if t.get("id")]
+    return user_id, team_ids
+
+
+def _pd_item(incident: dict, reason: str) -> dict:
+    num = incident.get("incident_number", "")
+    status = incident.get("status", "")
+    changed = incident.get("last_status_change_at", "")
+    service = (incident.get("service", {}) or {}).get("summary", "")
+    return {
+        # fp includes the status-change timestamp so every state transition
+        # (triggered -> acknowledged -> resolved/escalated) re-notifies once.
+        "fp": f"pd:{incident.get('id', '')}:{changed}",
+        "title": "PagerDuty",
+        "subtitle": f"#{num} · {status}" + (f" · {service}" if service else ""),
+        "message": f"[{reason}] {incident.get('title', '')}",
+        "url": incident.get("html_url", ""),
+    }
+
+
+def pagerduty_items(cfg: dict, window_min: int) -> list:
+    """Collect PagerDuty incidents assigned to the user and their teams.
+
+    - Incidents assigned to the user (triggered/acknowledged) -> "assigned".
+    - Team incidents updated within the poll window (any status) -> "team",
+      so acknowledge/resolve/escalate transitions surface as status changes.
+    """
+    pd = cfg.get("pagerduty", {})
+    if not pd.get("enabled"):
+        return []
+    token = pd.get("api_token", "")
+    if not token:
+        return []
+    user_id, team_ids = pd_identity(cfg)
+    since = (datetime.now(timezone.utc)
+             - timedelta(minutes=window_min)).isoformat()
+
+    items = []
+    seen_ids = set()
+
+    # 1) Active incidents assigned to me (any team).
+    if user_id:
+        params = [("user_ids[]", user_id), ("limit", "50"),
+                  ("sort_by", "created_at:desc")]
+        for st in _PD_ACTIVE_STATUSES:
+            params.append(("statuses[]", st))
+        data = _pd_get(token, "/incidents", params)
+        for inc in data.get("incidents", []):
+            iid = inc.get("id", "")
+            seen_ids.add(iid)
+            items.append(_pd_item(inc, "assigned to you"))
+
+    # 2) Team incidents changed within the window (captures status changes).
+    if team_ids:
+        params = [("since", since), ("limit", "50"),
+                  ("sort_by", "created_at:desc")]
+        for tid in team_ids:
+            params.append(("team_ids[]", tid))
+        data = _pd_get(token, "/incidents", params)
+        for inc in data.get("incidents", []):
+            if inc.get("id", "") in seen_ids:
+                continue  # already reported as assigned-to-you
+            items.append(_pd_item(inc, "team incident"))
+
+    return items
+
+
 def collect_all(cfg: dict, log=None):
     """Yield item lists in priority order (fast sources first).
 
@@ -241,4 +358,5 @@ def collect_all(cfg: dict, log=None):
         ("jira", jira_items(cfg, window_min)),
         ("github", gh_notifications(cfg)),
         ("ci", gh_ci_fallback(cfg, login)),
+        ("pagerduty", pagerduty_items(cfg, window_min)),
     ]

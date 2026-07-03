@@ -334,9 +334,11 @@ def test_collect_all_returns_phases(poll_mod, monkeypatch, sample_cfg):
     monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg: ["g"])
     monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: ["c"])
     monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: ["p"])
 
     phases = poll_mod.collect_all(sample_cfg)
-    assert phases == [("jira", ["j"]), ("github", ["g"]), ("ci", ["c"])]
+    assert phases == [("jira", ["j"]), ("github", ["g"]), ("ci", ["c"]),
+                      ("pagerduty", ["p"])]
 
 
 def test_collect_all_wires_custom_logger(poll_mod, monkeypatch, sample_cfg):
@@ -344,6 +346,7 @@ def test_collect_all_wires_custom_logger(poll_mod, monkeypatch, sample_cfg):
     monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg: [])
     monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
     monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: [])
 
     captured = []
     poll_mod.collect_all(sample_cfg, log=captured.append)
@@ -383,6 +386,160 @@ def test_gh_ci_fallback_collects_rollups(poll_mod, monkeypatch, sample_cfg):
     items = poll_mod.gh_ci_fallback(sample_cfg, "octocat")
     assert len(items) == 1
     assert items[0]["fp"] == "gh-ci:acme/app#1:fail"
+
+
+# ---------------------------------------------------------------------------
+# PagerDuty
+# ---------------------------------------------------------------------------
+
+def _pd_incident(iid="PINC1", num=42, status="triggered",
+                 changed="2026-07-01T00:00:00Z", title="Disk full",
+                 service="prod-api", html_url="https://acme.pagerduty.com/incidents/PINC1"):
+    return {
+        "id": iid,
+        "incident_number": num,
+        "status": status,
+        "last_status_change_at": changed,
+        "service": {"summary": service},
+        "title": title,
+        "html_url": html_url,
+    }
+
+
+def test_pagerduty_items_disabled_returns_empty(poll_mod):
+    assert poll_mod.pagerduty_items({"pagerduty": {"enabled": False}}, 10) == []
+
+
+def test_pagerduty_items_no_token_returns_empty(poll_mod):
+    cfg = {"pagerduty": {"enabled": True, "api_token": ""}}
+    assert poll_mod.pagerduty_items(cfg, 10) == []
+
+
+def test_pagerduty_items_builds_assigned_and_team(poll_mod, monkeypatch, sample_cfg):
+    calls = []
+
+    def fake_get(token, path, params=None):
+        calls.append(params)
+        # First call = assigned-to-me (user_ids[]); second = team.
+        if any(k == "user_ids[]" for k, _ in (params or [])):
+            return {"incidents": [_pd_incident(iid="PINC1", num=1,
+                                               status="triggered")]}
+        return {"incidents": [
+            _pd_incident(iid="PINC1", num=1, status="triggered"),  # dup, skipped
+            _pd_incident(iid="PINC2", num=2, status="acknowledged",
+                         title="CPU high"),
+        ]}
+
+    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
+    items = poll_mod.pagerduty_items(sample_cfg, 10)
+
+    assert len(items) == 2  # PINC1 assigned + PINC2 team (PINC1 dup skipped)
+    assigned = items[0]
+    assert assigned["title"] == "PagerDuty"
+    assert assigned["subtitle"] == "#1 · triggered · prod-api"
+    assert assigned["message"] == "[assigned to you] Disk full"
+    assert assigned["fp"] == "pd:PINC1:2026-07-01T00:00:00Z"
+    assert assigned["url"] == "https://acme.pagerduty.com/incidents/PINC1"
+    assert items[1]["message"] == "[team incident] CPU high"
+
+
+def test_pagerduty_items_no_service_summary(poll_mod, monkeypatch, sample_cfg):
+    inc = _pd_incident(service="")
+    monkeypatch.setattr(poll_mod, "_pd_get",
+                        lambda t, p, params=None: {"incidents": [inc]}
+                        if any(k == "user_ids[]" for k, _ in (params or []))
+                        else {"incidents": []})
+    items = poll_mod.pagerduty_items(sample_cfg, 10)
+    assert items[0]["subtitle"] == "#42 · triggered"  # no trailing service
+
+
+def test_pagerduty_items_only_teams_when_no_user_id(poll_mod, monkeypatch):
+    cfg = {"pagerduty": {"enabled": True, "api_token": "tok",
+                         "user_id": "", "team_ids": ["PTEAM1"]}}
+    seen = {"user": False}
+
+    def fake_get(token, path, params=None):
+        if any(k == "user_ids[]" for k, _ in (params or [])):
+            seen["user"] = True
+            return {"incidents": []}
+        return {"incidents": [_pd_incident(iid="PT1", num=9,
+                                           status="triggered")]}
+
+    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
+    items = poll_mod.pagerduty_items(cfg, 10)
+    # user_id empty -> no assigned query issued; only the team item remains.
+    assert seen["user"] is False
+    assert len(items) == 1
+    assert items[0]["message"].startswith("[team incident]")
+
+
+def test_pd_identity_uses_configured_values(poll_mod, sample_cfg):
+    # Both user_id and team_ids present -> no network call.
+    assert poll_mod.pd_identity(sample_cfg) == ("PUSER1", ["PTEAM1"])
+
+
+def test_pd_identity_no_token_returns_configured(poll_mod):
+    cfg = {"pagerduty": {"enabled": True, "api_token": "",
+                         "user_id": "", "team_ids": []}}
+    assert poll_mod.pd_identity(cfg) == ("", [])
+
+
+def test_pd_identity_autodetects_via_users_me(poll_mod, monkeypatch):
+    cfg = {"pagerduty": {"enabled": True, "api_token": "tok",
+                         "user_id": "", "team_ids": []}}
+    monkeypatch.setattr(poll_mod, "_pd_get", lambda t, p, params=None: {
+        "user": {"id": "PME", "teams": [{"id": "PTX"}, {"id": ""}]}})
+    assert poll_mod.pd_identity(cfg) == ("PME", ["PTX"])
+
+
+def test_pd_get_parses_json(poll_mod, monkeypatch):
+    payload = json.dumps({"user": {"id": "PME"}}).encode()
+
+    class FakeResp:
+        def read(self):
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen",
+                        lambda *a, **k: FakeResp())
+    assert poll_mod._pd_get("tok", "/users/me") == {"user": {"id": "PME"}}
+
+
+def test_pd_get_with_params_builds_query(poll_mod, monkeypatch):
+    captured = {}
+
+    class FakeResp:
+        def read(self):
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, *a, **k):
+        captured["url"] = req.full_url
+        return FakeResp()
+
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", fake_urlopen)
+    poll_mod._pd_get("tok", "/incidents", [("user_ids[]", "P1"), ("limit", "5")])
+    assert "user_ids%5B%5D=P1" in captured["url"]
+    assert captured["url"].startswith("https://api.pagerduty.com/incidents?")
+
+
+def test_pd_get_swallows_network_error(poll_mod, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("pd down")
+
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
+    assert poll_mod._pd_get("tok", "/users/me") == {}
 
 
 def test_default_log_prints(poll_mod, capsys):

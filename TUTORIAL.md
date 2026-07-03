@@ -1,8 +1,8 @@
 # Dev Notifier — Tutorial
 
 A step-by-step guide to installing, configuring, and running Dev Notifier: a
-macOS menu-bar app that watches Jira & GitHub and shows clickable desktop
-notifications.
+macOS menu-bar app that watches Jira, GitHub & PagerDuty and shows clickable
+desktop notifications.
 
 ---
 
@@ -75,6 +75,19 @@ config.
    → **Create API token** → copy it.
 2. You'll paste it into the config file in the next step.
 
+### PagerDuty — User API token (optional)
+
+1. In the PagerDuty web app, click your avatar → **My Profile** → **User
+   Settings**.
+2. Under **API Access**, click **Create API User Token**, give it a description
+   (e.g. `dev-notifier`), then **Create Key**.
+3. **Copy the token now** — it's shown only once. It's a 20-character string.
+4. You'll paste it into the config file in the next step. Leave `user_id` and
+   `team_ids` blank — Dev Notifier auto-detects them from your token.
+
+> Requests made with a personal (User) API token are restricted to your own
+> permissions, so a read-only view of your incidents needs no extra setup.
+
 ---
 
 ## 3. Configure
@@ -99,6 +112,12 @@ Open it from the menu: **menu-bar icon → Open config file**, and fill in:
     "enabled": true,
     "login": ""
   },
+  "pagerduty": {
+    "enabled": false,
+    "api_token": "",
+    "user_id": "",
+    "team_ids": []
+  },
   "poll": {
     "interval_seconds": 300,
     "window_minutes": 10
@@ -115,12 +134,17 @@ Field reference:
 | `jira.username` | Your Atlassian account email |
 | `jira.api_token` | The token created in step 2 |
 | `github.login` | Leave blank to auto-detect via `gh api user` |
+| `pagerduty.enabled` | Set to `true` to turn on PagerDuty notifications |
+| `pagerduty.api_token` | Your PagerDuty **User** API token (from step 2) |
+| `pagerduty.user_id` | Leave blank to auto-detect via `/users/me` |
+| `pagerduty.team_ids` | Leave blank (`[]`) to auto-detect your teams |
 | `poll.interval_seconds` | How often to check (default 300 = 5 min) |
 | `poll.window_minutes` | How far back each check looks (default 10) |
 | `theme` | `Orange` \| `Green` \| `Purple` \| `Rainbow` \| `Yellow` |
 
 After editing, click **Check dependencies** in the menu — the **Status:** line
-should show `Jira ✓  ·  GitHub ✓`.
+should show `Jira ✓  ·  GitHub ✓  ·  PagerDuty ✓` (PagerDuty appears only when
+enabled).
 
 > The config file stays on your machine and is never committed or uploaded.
 
@@ -136,10 +160,15 @@ should show `Jira ✓  ·  GitHub ✓`.
 - **GitHub CI (fallback)** — the CI rollup of your open PRs, so you get pinged
   on ❌ failures / ⏳ pending even if GitHub notification settings suppress them.
   Green CI does not notify.
+- **PagerDuty** (when enabled) — incidents **assigned to you** that are
+  triggered or acknowledged, plus your **teams' incidents** changed within the
+  poll window. Because each notification is keyed on the incident's last
+  status-change time, transitions (acknowledge → resolve → escalate) resurface
+  as new notifications.
 
 When something new appears, Dev Notifier shows a native notification.
-**Clicking the notification opens its Jira issue / PR in your browser.** You can
-also reopen anything later from the **Recent:** menu.
+**Clicking the notification opens its Jira issue / PR / PagerDuty incident in
+your browser.** You can also reopen anything later from the **Recent:** menu.
 
 ---
 
@@ -148,12 +177,12 @@ also reopen anything later from the **Recent:** menu.
 | Item | What it does |
 |------|--------------|
 | **Check now** | Poll immediately instead of waiting for the timer |
-| **Status:** | Shows Jira / GitHub readiness; click to re-check |
+| **Status:** | Shows Jira / GitHub / PagerDuty readiness; click to re-check |
 | **Recent:** | Last items seen; hover an entry → **Open** / **Remove** |
 | **Clear all recent** | Empties the recent list |
 | **Theme ▸** | Switch the menu-bar icon color |
 | **Start at login** | Toggle auto-start (installs/removes a LaunchAgent) |
-| **Check dependencies** | Re-run the gh/Jira checks and report |
+| **Check dependencies** | Re-run the gh / Jira / PagerDuty checks and report |
 | **Open config file** | Edit your settings |
 | **Quit** | Exit the app |
 
@@ -188,6 +217,18 @@ system-wide.
 - Open the config file and make sure `base_url`, `username`, and `api_token`
   are filled with real values (not the `your-domain` / `@example.com`
   placeholders).
+
+**Status shows `PagerDuty: ⚠ Needs token`**
+- You set `pagerduty.enabled` to `true` but left `api_token` empty. Paste a
+  User API token (My Profile → User Settings → API Access), then click
+  **Check dependencies**. To turn PagerDuty off entirely, set `enabled` back to
+  `false`.
+
+**PagerDuty enabled but no incidents notify**
+- With auto-detect, confirm your token can reach the API. Only incidents
+  assigned to you (triggered/acknowledged) or your teams' incidents changed
+  within `window_minutes` are surfaced; already-resolved older incidents won't
+  re-notify.
 
 **Clicking a notification doesn't open anything**
 - Make sure you allowed notifications on first launch. If you denied it, enable

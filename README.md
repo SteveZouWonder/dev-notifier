@@ -2,7 +2,7 @@
 
 # Dev Notifier 🔔
 
-### A tiny macOS menu-bar app that watches Jira & GitHub for things relevant to you and shows clickable desktop notifications
+### A tiny macOS menu-bar app that watches Jira, GitHub & PagerDuty for things relevant to you and shows clickable desktop notifications
 
 [![Release](https://img.shields.io/github/v/release/SteveZouWonder/dev-notifier)](../../releases)
 [![Python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org/)
@@ -21,9 +21,13 @@ Dev Notifier lives in your menu bar and polls, every few minutes:
   PRs (via the `gh` CLI notifications API).
 - **GitHub CI (fallback)** — the CI rollup of your open PRs, so you get pinged
   on ❌ failures / ⏳ pending even if notification settings suppress them.
+- **PagerDuty** — incidents assigned to you (triggered/acknowledged) and your
+  teams' incidents changed recently, so acknowledge / resolve / escalate status
+  changes resurface (via the PagerDuty REST API).
 
 When something new shows up it raises a **native macOS notification**, and
-**clicking the notification opens the Jira issue / PR in your browser**.
+**clicking the notification opens the Jira issue / PR / incident in your
+browser**.
 
 Because it's a properly bundled `.app` with its own bundle identifier, macOS
 grants it real notification permission — unlike ad-hoc `osascript`/CLI
@@ -61,6 +65,12 @@ Open it (menu-bar icon → **Open config file**) and fill in your details:
     "enabled": true,
     "login": ""
   },
+  "pagerduty": {
+    "enabled": false,
+    "api_token": "",
+    "user_id": "",
+    "team_ids": []
+  },
   "poll": {
     "interval_seconds": 300,
     "window_minutes": 10
@@ -72,6 +82,10 @@ Open it (menu-bar icon → **Open config file**) and fill in your details:
   <https://id.atlassian.com/manage-profile/security/api-tokens>.
 - **GitHub:** no token needed — it uses the [`gh` CLI](https://cli.github.com).
   Run `gh auth login` once. Leave `login` blank to auto-detect.
+- **PagerDuty:** set `enabled` to `true` and paste a **User API token**
+  (PagerDuty → *My Profile → User Settings → API Access → Create API User
+  Token*). Leave `user_id` and `team_ids` blank to auto-detect the current user
+  and their teams via `/users/me`.
 - **poll:** `interval_seconds` how often to check, `window_minutes` how far
   back each check looks.
 
@@ -80,20 +94,20 @@ The config file stays on your machine and is never committed.
 ## Menu
 
 - **Check now** — poll immediately (manual pull).
-- **Status:** — shows whether Jira / GitHub are ready; click to re-check.
+- **Status:** — shows whether Jira / GitHub / PagerDuty are ready; click to re-check.
 - **Recent:** — the last items seen; hover → **Open** / **Remove**.
 - **Clear all recent** — empty the list.
 - **Theme ▸** — switch the menu-bar icon color.
 - **Start at login** — toggle auto-start (installs/removes a LaunchAgent).
-- **Check dependencies** — re-run the gh / Jira checks.
+- **Check dependencies** — re-run the gh / Jira / PagerDuty checks.
 - **Open config file** — edit your settings.
 - **Quit**.
 
 ### Dependency checks
 
-On startup the app verifies the `gh` CLI (installed + logged in) and your Jira
-config, showing the result in the **Status:** line and guiding you if something
-is missing. You can also run the standalone doctor:
+On startup the app verifies the `gh` CLI (installed + logged in), your Jira
+config, and your PagerDuty token, showing the result in the **Status:** line and
+guiding you if something is missing. You can also run the standalone doctor:
 
 ```bash
 bash scripts/doctor.sh

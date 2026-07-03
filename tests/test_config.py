@@ -75,6 +75,12 @@ def test_is_configured_true_when_only_github_enabled(config_mod):
     assert config_mod.is_configured(cfg) is True
 
 
+def test_is_configured_true_when_only_pagerduty_ready(config_mod):
+    cfg = {"jira": {"enabled": False}, "github": {"enabled": False},
+           "pagerduty": {"enabled": True, "api_token": "tok"}}
+    assert config_mod.is_configured(cfg) is True
+
+
 def test_is_configured_false_when_nothing_usable(config_mod):
     cfg = {
         "jira": {"enabled": True, "base_url": "https://your-domain.atlassian.net",

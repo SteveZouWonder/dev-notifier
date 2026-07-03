@@ -135,8 +135,10 @@ class NotifierApp(rumps.App):
         self.dep_status = {
             "gh": {"installed": False, "authed": False, "login": "", "detail": ""},
             "jira": {"enabled": False, "configured": False, "detail": ""},
+            "pagerduty": {"enabled": False, "configured": False, "detail": ""},
             "github_ok": False,
             "jira_ok": False,
+            "pagerduty_ok": False,
             "ok": False,
             "problems": [],
             "pending": True,  # first real check hasn't run yet
@@ -416,10 +418,17 @@ class NotifierApp(rumps.App):
             github_line = "GitHub: ⚠ Needs login"
         else:
             github_line = "GitHub: Off"
+        if s.get("pagerduty_ok"):
+            pd_line = "PagerDuty: ✓ Ready"
+        elif self.cfg.get("pagerduty", {}).get("enabled"):
+            pd_line = "PagerDuty: ⚠ Needs token"
+        else:
+            pd_line = "PagerDuty: Off"
 
         parent = rumps.MenuItem("Status", callback=self._recheck_deps)
         parent.add(rumps.MenuItem(jira_line, callback=None))
         parent.add(rumps.MenuItem(github_line, callback=None))
+        parent.add(rumps.MenuItem(pd_line, callback=None))
         parent.add(rumps.separator)
         parent.add(rumps.MenuItem("Re-check now", callback=self._recheck_deps))
         return parent
