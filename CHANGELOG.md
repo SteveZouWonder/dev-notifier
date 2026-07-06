@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.5.3] - 2026-07-06
+
 ### Added
 - Jira notifications are now event-level to match Jira's notification feed: instead of one notification per updated issue, each in-window status/assignee change and each comment is notified individually. Controlled by `jira.event_mode` (default on) and `jira.event_fields` (default `["status", "assignee"]`; comments are always included). Set `jira.event_mode` to `false` for the previous issue-level behaviour
 
