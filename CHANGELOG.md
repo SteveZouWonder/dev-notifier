@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+### Changed
+- internal groundwork toward cross-platform support: introduced a `platform_backend` abstraction (system integration: open-URL, start-at-login, main-thread dispatch) and a cross-platform `paths` module for config/cache directories. macOS behaviour and paths are unchanged; `rumps` is now an install requirement only on macOS (see `docs/windows-support-plan.md`)
+
 ## [v1.5.3] - 2026-07-06
 
 ### Added
