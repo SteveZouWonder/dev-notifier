@@ -158,6 +158,8 @@ class NotifierApp(rumps.App):
             "html_url": updater_mod.RELEASES_PAGE,
             "dmg_url": None,
             "dmg_name": None,
+            "installer_url": None,
+            "installer_name": None,
             "sha256_url": None,
             "from_source": not updater_mod.is_frozen(),
             "error": None,

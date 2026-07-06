@@ -175,6 +175,55 @@ def test_fetch_latest_release_no_assets(updater_mod, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# platform-aware installer selection
+# ---------------------------------------------------------------------------
+
+def test_installer_regex_windows_matches_exe(updater_mod):
+    regex = updater_mod._installer_regex("win32")
+    assert regex.search("DevNotifier-1.4.0-setup.exe")
+    assert not regex.search("DevNotifier-1.4.0.dmg")
+
+
+def test_installer_regex_macos_matches_dmg(updater_mod):
+    regex = updater_mod._installer_regex("darwin")
+    assert regex.search("DevNotifier-1.4.0.dmg")
+    assert not regex.search("DevNotifier-1.4.0-setup.exe")
+
+
+def test_installer_regex_other_platform_is_none(updater_mod):
+    assert updater_mod._installer_regex("linux") is None
+
+
+def test_current_version_frozen_windows_uses_module_version(updater_mod, monkeypatch):
+    # On Windows there is no Info.plist; frozen falls back to __version__.
+    monkeypatch.setattr(updater_mod, "is_frozen", lambda: True)
+    monkeypatch.setattr(updater_mod.sys, "platform", "win32")
+    assert updater_mod.current_version() == updater_mod.__version__
+
+
+def test_fetch_latest_release_picks_exe_on_windows(updater_mod, monkeypatch):
+    monkeypatch.setattr(updater_mod.sys, "platform", "win32")
+    payload = {
+        "tag_name": "v1.4.0", "html_url": "u",
+        "assets": [
+            {"name": "DevNotifier-1.4.0.dmg",
+             "browser_download_url": "https://x/DevNotifier-1.4.0.dmg"},
+            {"name": "DevNotifier-1.4.0-setup.exe",
+             "browser_download_url": "https://x/DevNotifier-1.4.0-setup.exe"},
+            {"name": "SHA256SUMS.txt",
+             "browser_download_url": "https://x/SHA256SUMS.txt"},
+        ],
+    }
+    monkeypatch.setattr(updater_mod, "_http_get",
+                        lambda *a, **k: json.dumps(payload).encode())
+    rel = updater_mod.fetch_latest_release()
+    # dmg_* stays the macOS asset; installer_* is the current-platform (exe).
+    assert rel["dmg_name"] == "DevNotifier-1.4.0.dmg"
+    assert rel["installer_name"] == "DevNotifier-1.4.0-setup.exe"
+    assert rel["installer_url"] == "https://x/DevNotifier-1.4.0-setup.exe"
+
+
+# ---------------------------------------------------------------------------
 # check_for_update
 # ---------------------------------------------------------------------------
 
@@ -276,7 +325,7 @@ def _sha256(data: bytes) -> str:
 def test_download_and_open_no_dmg_url(updater_mod):
     result = updater_mod.download_and_open({"dmg_url": None})
     assert result["ok"] is False
-    assert "No DMG asset" in result["error"]
+    assert "No installer asset" in result["error"]
 
 
 def test_download_and_open_success_no_checksum(updater_mod, monkeypatch, temp_home):
@@ -399,3 +448,46 @@ def test_download_and_open_download_error(updater_mod, monkeypatch, temp_home):
     result = updater_mod.download_and_open(info)
     assert result["ok"] is False
     assert result["error"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Windows installer download + open (os.startfile branch)
+# ---------------------------------------------------------------------------
+
+def test_open_installer_windows_uses_startfile(updater_mod, monkeypatch):
+    monkeypatch.setattr(updater_mod.sys, "platform", "win32")
+    opened = {}
+    monkeypatch.setattr(updater_mod.os, "startfile",
+                        lambda p: opened.setdefault("path", p), raising=False)
+    updater_mod._open_installer("C:\\cache\\DevNotifier-setup.exe")
+    assert opened["path"] == "C:\\cache\\DevNotifier-setup.exe"
+
+
+def test_open_installer_macos_uses_open(updater_mod, monkeypatch):
+    monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
+    import subprocess
+    called = {}
+    monkeypatch.setattr(subprocess, "run",
+                        lambda args, **k: called.setdefault("args", args))
+    updater_mod._open_installer("/cache/DevNotifier.dmg")
+    assert called["args"] == ["open", "/cache/DevNotifier.dmg"]
+
+
+def test_download_and_open_windows_installer(updater_mod, monkeypatch, temp_home):
+    # Full Windows flow: download the .exe via installer_url, then startfile it.
+    monkeypatch.setattr(updater_mod.sys, "platform", "win32")
+    payload = b"exe-bytes"
+    monkeypatch.setattr(updater_mod.urllib.request, "urlopen",
+                        lambda *a, **k: _FakeDownloadResp([payload]))
+    opened = {}
+    monkeypatch.setattr(updater_mod.os, "startfile",
+                        lambda p: opened.setdefault("path", p), raising=False)
+
+    info = {"installer_url": "https://x/DevNotifier-1.4.0-setup.exe",
+            "installer_name": "DevNotifier-1.4.0-setup.exe",
+            "sha256_url": None}
+    result = updater_mod.download_and_open(info)
+
+    assert result["ok"] is True
+    assert result["path"].endswith("DevNotifier-1.4.0-setup.exe")
+    assert opened["path"].endswith("DevNotifier-1.4.0-setup.exe")
