@@ -1,55 +1,193 @@
 # Dev Notifier — Tutorial
 
-A step-by-step guide to installing, configuring, and running Dev Notifier: a
-**macOS & Windows** tray app that watches Jira, GitHub & PagerDuty and shows
-clickable desktop notifications.
+**Dev Notifier** is a little app that sits in your menu bar (macOS) or system
+tray (Windows) and quietly watches **Jira**, **GitHub**, and **PagerDuty** for
+things that concern you. When something new shows up, it pops a desktop
+notification — and clicking it opens the issue / pull request / incident in your
+browser.
 
-On macOS it lives in the **menu bar**; on Windows it lives in the **system
-tray** (bottom-right, near the clock). The behaviour is the same on both.
+You don't need to be a developer to use it. This guide starts with the
+**5‑minute quick start**; the later sections are only there if you want them.
+
+- New to it? Read **[Quick start](#quick-start)**.
+- Want GitHub or PagerDuty too? See **[Add more sources](#add-more-sources-optional)**.
+- Something not working? See **[Troubleshooting](#troubleshooting)**.
+- Command‑line lover / power user? See **[Advanced](#advanced-optional)**.
 
 ---
 
-## 1. Install
+## Quick start
 
-### macOS — Option A: download the DMG (recommended)
+Get Jira notifications working in about 5 minutes — all by clicking, no
+command line needed.
 
-1. Go to [Releases](../../releases) and download the latest
-   `DevNotifier-<version>.dmg`.
-2. Open the DMG and drag **DevNotifier.app** into your `Applications` folder.
-3. This is an unsigned, open-source build (no paid Apple Developer
-   certificate), so macOS blocks it on first launch. Open it once via:
-   - **Right-click** `DevNotifier.app` → **Open** → click **Open** in the
-     dialog.
-   - If macOS says *"is damaged and can't be opened"*, run in Terminal:
-     ```bash
-     xattr -dr com.apple.quarantine /Applications/DevNotifier.app
-     ```
-     then double-click to open.
-4. When prompted **"DevNotifier wants to send you notifications"**, click
-   **Allow**. (Required for the notifications to appear — and for clicking them
-   to open links.)
+### Step 1 — Install the app
 
-After launch, a lightning-bolt icon appears in your menu bar.
+**macOS**
+1. Download the latest **`DevNotifier‑<version>.dmg`** from
+   [Releases](../../releases).
+2. Open it and drag **DevNotifier** into your **Applications** folder.
+3. The first time, **right‑click** DevNotifier → **Open** → **Open**.
+   *(This build is free and open‑source, so it isn't signed with a paid Apple
+   certificate — that's why macOS asks. It's safe.)*
+4. If it asks to send notifications, click **Allow**.
 
-### Windows — Option A: download the EXE (recommended)
+**Windows**
+1. Download the latest **`DevNotifier‑<version>.exe`** from
+   [Releases](../../releases).
+2. Double‑click it. If Windows shows *"Windows protected your PC"*, click
+   **More info** → **Run anyway**.
+   *(Same reason as above — it's an unsigned open‑source build, not a virus.)*
+3. If it asks to send notifications, click **Allow**.
 
-1. Go to [Releases](../../releases) and download the latest
-   `DevNotifier-<version>.exe`.
-2. Double-click to run it. This is an unsigned, open-source build, so Windows
-   SmartScreen may warn *"Windows protected your PC"*. Click **More info** →
-   **Run anyway**.
-3. The app appears as a lightning-bolt icon in the **system tray**
-   (click the ▲ "show hidden icons" arrow if it's collapsed). **Right-click**
-   the icon for the menu.
-4. Allow notifications if Windows prompts; toasts appear in the Action Center.
+A small **lightning‑bolt icon** now appears — in the menu bar (macOS, top‑right)
+or the system tray (Windows, bottom‑right; click the ▲ arrow if it's hidden).
 
-### Option B — run from source (macOS or Windows)
+### Step 2 — Get a Jira token (30 seconds)
 
-Requires Python 3.12+. Platform dependencies are selected automatically by
-`requirements.txt` markers (rumps on macOS; pystray + Pillow + winotify on
-Windows).
+1. Open <https://id.atlassian.com/manage-profile/security/api-tokens> in your
+   browser.
+2. Click **Create API token**, give it a name like `dev-notifier`, and click
+   **Create**.
+3. **Copy** the token (you'll paste it in the next step).
 
-**macOS:**
+### Step 3 — Enter your Jira details
+
+1. Click the lightning‑bolt icon → **Open config file**. A text file opens.
+2. Fill in three things under `"jira"`:
+   - `base_url` — your Jira address, e.g. `https://acme.atlassian.net`
+   - `username` — your Atlassian login email
+   - `api_token` — paste the token from Step 2
+3. **Save** the file.
+
+> The file has short notes next to each field to guide you. Only change the
+> values inside the quotes; keep the quotes and commas as they are.
+
+### Step 4 — Confirm it's working
+
+Click the icon → **Check dependencies**. The **Status** line should show
+**Jira ✓**. That's it — you'll now get a notification whenever a relevant Jira
+issue changes, and clicking it opens the issue.
+
+Don't want GitHub? In the config file set `"enabled": false` under `"github"`,
+save, and click **Check dependencies** again.
+
+---
+
+## What you'll get notified about
+
+- **Jira** — issues where you're the assignee, reporter, or watcher that were
+  updated, plus comments that mention you.
+- **GitHub** *(optional)* — review requests, mentions, assignments, and activity
+  on your own pull requests. Plus a heads‑up when your PR's checks **fail** or
+  are **pending**.
+- **PagerDuty** *(optional)* — incidents assigned to you or your teams, and when
+  their status changes (acknowledge → resolve → escalate).
+
+Click any notification to open it in your browser. You can also reopen recent
+items from the **Recent** menu.
+
+---
+
+## Using the menu
+
+Click (macOS) or right‑click (Windows) the icon:
+
+| Item | What it does |
+|------|--------------|
+| **Check now** | Check right away instead of waiting for the timer |
+| **Status** | Shows whether Jira / GitHub / PagerDuty are ready |
+| **Recent** | The last items seen — reopen or remove them |
+| **Clear all recent** | Empty the recent list |
+| **Theme** | Change the icon color |
+| **Start at login** | Launch automatically when you sign in |
+| **Check dependencies** | Re‑check your setup and report any problems |
+| **Open config file** | Edit your settings |
+| **Quit** | Exit the app |
+
+---
+
+## Add more sources (optional)
+
+### GitHub
+
+GitHub uses the free **GitHub CLI** (`gh`) so no token is stored in the app.
+This step does need a terminal once.
+
+1. Install the GitHub CLI:
+   - **macOS:** `brew install gh`
+   - **Windows:** `winget install --id GitHub.cli` (or download from
+     <https://cli.github.com>), then open a **new** terminal window.
+2. Sign in once: run `gh auth login`, choose **GitHub.com → HTTPS**, and finish
+   in the browser.
+3. Back in Dev Notifier, click **Check dependencies** — GitHub should show ✓.
+
+If you'd rather not use GitHub at all, set `"enabled": false` under `"github"`
+in the config file.
+
+### PagerDuty
+
+1. In PagerDuty, go to your avatar → **My Profile → User Settings → API
+   Access → Create API User Token**. Copy the token (shown once).
+2. Click the icon → **Open config file**. Under `"pagerduty"`, set
+   `"enabled": true` and paste the token into `"api_token"`. Save.
+3. Click **Check dependencies** — PagerDuty should show ✓.
+
+Your teams and user ID are detected automatically from the token.
+
+---
+
+## Start at login
+
+Click the icon → **Start at login** to have Dev Notifier launch automatically
+when you sign in. Click it again to turn it off. Nothing is installed
+system‑wide, and it only affects your own user account.
+
+---
+
+## Troubleshooting
+
+**No notifications appear**
+- **macOS:** System Settings → Notifications → **DevNotifier** → set to *Allow*.
+  Turn off Do Not Disturb / Focus.
+- **Windows:** Settings → System → **Notifications** → turn on *Dev Notifier*.
+  Turn off Focus assist / Do not disturb.
+
+**Status shows Jira isn't ready**
+- Open the config file and make sure `base_url`, `username`, and `api_token`
+  are your real values (not the `your-domain` / `you@example.com` placeholders),
+  then **Save** and click **Check dependencies**.
+- If you see a note in the log about "could not read config", the file has a
+  small typo (often a missing comma or quote). Your file is kept as‑is so you
+  can fix it — see [View the log](#view-the-log).
+
+**Status shows GitHub isn't ready**
+- The `gh` tool isn't installed or you're not signed in. Follow
+  [GitHub](#github) above, then click **Check dependencies**.
+
+**Status shows "PagerDuty: Needs token"**
+- You turned PagerDuty on but didn't paste a token. Add one (see
+  [PagerDuty](#pagerduty)) or set `"enabled": false` to turn it back off.
+
+**Clicking a notification doesn't open anything**
+- Make sure you allowed notifications the first time. On Windows, also make sure
+  you have a default web browser set.
+
+**macOS says the app "is damaged"**
+- This is the unsigned‑build warning. See [Advanced](#advanced-optional) for the
+  one‑line fix, or right‑click → **Open** as in Step 1.
+
+---
+
+## Advanced (optional)
+
+Everything below is for power users. A typical user never needs it.
+
+### Run from source
+
+Requires Python 3.12+. Platform dependencies are picked automatically.
+
+**macOS**
 ```bash
 git clone https://github.com/SteveZouWonder/dev-notifier.git
 cd dev-notifier
@@ -58,7 +196,7 @@ pip install -r requirements.txt
 python launcher.py
 ```
 
-**Windows (PowerShell):**
+**Windows (PowerShell)**
 ```powershell
 git clone https://github.com/SteveZouWonder/dev-notifier.git
 cd dev-notifier
@@ -67,216 +205,35 @@ pip install -r requirements.txt
 python launcher.py
 ```
 
----
-
-## 2. Prerequisites
-
-Dev Notifier needs at least one working data source. It checks these on
-startup (menu → **Status:** line, and **Check dependencies**).
-
-### GitHub — via the `gh` CLI (no token needed)
-
-1. Install the GitHub CLI:
-   - **macOS:** `brew install gh`
-   - **Windows:** `winget install --id GitHub.cli` (or download from
-     <https://cli.github.com>). Open a **new** terminal afterward so `gh` is on
-     your `PATH`.
-2. Log in once:
-   ```bash
-   gh auth login
-   ```
-   Choose **GitHub.com** → **HTTPS** → authenticate in the browser. Grant at
-   least the `repo` and `read:org` scopes.
-3. Verify:
-   ```bash
-   gh auth status
-   gh api user --jq .login
-   ```
-
-Dev Notifier calls `gh` under the hood, so no GitHub token is stored in its
-config.
-
-### Jira — API token
-
-1. Create a token at
-   <https://id.atlassian.com/manage-profile/security/api-tokens>
-   → **Create API token** → copy it.
-2. You'll paste it into the config file in the next step.
-
-### PagerDuty — User API token (optional)
-
-1. In the PagerDuty web app, click your avatar → **My Profile** → **User
-   Settings**.
-2. Under **API Access**, click **Create API User Token**, give it a description
-   (e.g. `dev-notifier`), then **Create Key**.
-3. **Copy the token now** — it's shown only once. It's a 20-character string.
-4. You'll paste it into the config file in the next step. Leave `user_id` and
-   `team_ids` blank — Dev Notifier auto-detects them from your token.
-
-> Requests made with a personal (User) API token are restricted to your own
-> permissions, so a read-only view of your incidents needs no extra setup.
-
----
-
-## 3. Configure
-
-On first launch a config file is created at:
+### Where files live
 
 ```
-macOS:    ~/.config/dev-notifier/config.json
-Windows:  %APPDATA%\dev-notifier\config.json
+Config   macOS:   ~/.config/dev-notifier/config.json
+         Windows: %APPDATA%\dev-notifier\config.json
+Log      macOS:   ~/.config/dev-notifier/notifier.log
+         Windows: %APPDATA%\dev-notifier\notifier.log
 ```
 
-Open it from the menu: **tray icon → Open config file**, and fill in:
+### Advanced config fields
 
-```json
-{
-  "jira": {
-    "enabled": true,
-    "base_url": "https://your-domain.atlassian.net",
-    "username": "you@example.com",
-    "api_token": "PASTE_YOUR_JIRA_TOKEN_HERE"
-  },
-  "github": {
-    "enabled": true,
-    "login": ""
-  },
-  "pagerduty": {
-    "enabled": false,
-    "api_token": "",
-    "user_id": "",
-    "team_ids": []
-  },
-  "poll": {
-    "interval_seconds": 300,
-    "window_minutes": 10
-  },
-  "theme": "Orange"
-}
-```
+The first‑run file only shows the common settings. You can add any of these by
+hand; each has a sensible built‑in default, so you only need them to change
+behaviour:
 
-Field reference:
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `poll.interval_seconds` | `300` | How often to check (seconds) |
+| `poll.window_minutes` | `1440` | How far back the first check looks |
+| `poll.max_window_minutes` | `10080` | Cap on the look‑back window (7 days) |
+| `jira.event_mode` | `true` | One notification per change/comment vs. per issue |
+| `jira.event_fields` | `["status","assignee"]` | Which Jira field changes notify you |
+| `github.login` | `""` | Leave blank to auto‑detect via `gh api user` |
+| `pagerduty.user_id` / `team_ids` | auto | Leave blank to auto‑detect |
+| `update.enabled` | `true` | Auto‑check GitHub Releases for a newer version |
+| `theme` | `"Orange"` | `Orange \| Green \| Purple \| Rainbow \| Yellow` |
 
-| Field | Meaning |
-|-------|---------|
-| `jira.base_url` | Your Atlassian site, e.g. `https://acme.atlassian.net` |
-| `jira.username` | Your Atlassian account email |
-| `jira.api_token` | The token created in step 2 |
-| `github.login` | Leave blank to auto-detect via `gh api user` |
-| `pagerduty.enabled` | Set to `true` to turn on PagerDuty notifications |
-| `pagerduty.api_token` | Your PagerDuty **User** API token (from step 2) |
-| `pagerduty.user_id` | Leave blank to auto-detect via `/users/me` |
-| `pagerduty.team_ids` | Leave blank (`[]`) to auto-detect your teams |
-| `poll.interval_seconds` | How often to check (default 300 = 5 min) |
-| `poll.window_minutes` | How far back each check looks (default 10) |
-| `theme` | `Orange` \| `Green` \| `Purple` \| `Rainbow` \| `Yellow` |
+### View the log
 
-After editing, click **Check dependencies** in the menu — the **Status:** line
-should show `Jira ✓  ·  GitHub ✓  ·  PagerDuty ✓` (PagerDuty appears only when
-enabled).
-
-> The config file stays on your machine and is never committed or uploaded.
-
----
-
-## 4. What gets monitored
-
-- **Jira** — issues where you are assignee, reporter, or watcher that were
-  updated recently, plus comments mentioning you.
-- **GitHub** — review requests, mentions, assignments, and activity on your
-  own PRs (via `gh api notifications`; the noisy `subscribed` reason is
-  filtered out).
-- **GitHub CI (fallback)** — the CI rollup of your open PRs, so you get pinged
-  on ❌ failures / ⏳ pending even if GitHub notification settings suppress them.
-  Green CI does not notify.
-- **PagerDuty** (when enabled) — incidents **assigned to you** that are
-  triggered or acknowledged, plus your **teams' incidents** changed within the
-  poll window. Because each notification is keyed on the incident's last
-  status-change time, transitions (acknowledge → resolve → escalate) resurface
-  as new notifications.
-
-When something new appears, Dev Notifier shows a native notification.
-**Clicking the notification opens its Jira issue / PR / PagerDuty incident in
-your browser.** You can also reopen anything later from the **Recent:** menu.
-
----
-
-## 5. Using the menu
-
-| Item | What it does |
-|------|--------------|
-| **Check now** | Poll immediately instead of waiting for the timer |
-| **Status:** | Shows Jira / GitHub / PagerDuty readiness; click to re-check |
-| **Recent:** | Last items seen; hover an entry → **Open** / **Remove** |
-| **Clear all recent** | Empties the recent list |
-| **Theme ▸** | Switch the tray icon color |
-| **Start at login** | Toggle auto-start (macOS: LaunchAgent; Windows: `Run` registry entry) |
-| **Check dependencies** | Re-run the gh / Jira / PagerDuty checks and report |
-| **Open config file** | Edit your settings |
-| **Quit** | Exit the app |
-
----
-
-## 6. Start at login
-
-Enable **menu → Start at login** to have Dev Notifier launch automatically when
-you log in. This adds a per-user entry:
-
-- **macOS** — a LaunchAgent at
-  `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`.
-- **Windows** — a value named `DevNotifier` under
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
-
-Toggling it off removes that entry. Nothing is installed system-wide.
-
----
-
-## 7. Troubleshooting
-
-**No notifications appear**
-- **macOS:** check **System Settings → Notifications → DevNotifier** is set to
-  *Allow* (style *Alerts* keeps them on screen); ensure Focus / Do Not Disturb
-  is off.
-- **Windows:** check **Settings → System → Notifications** is on for
-  *Dev Notifier*, and turn off **Focus assist / Do not disturb**.
-
-**Status shows `GitHub …` (not ✓)**
-- `gh` isn't installed or logged in. Install it (macOS: `brew install gh`;
-  Windows: `winget install --id GitHub.cli`), run `gh auth login`, then click
-  **Check dependencies**. On Windows, make sure you opened a new terminal so
-  `gh` is on the `PATH`.
-
-**Status shows `Jira …` (not ✓)**
-- Open the config file and make sure `base_url`, `username`, and `api_token`
-  are filled with real values (not the `your-domain` / `@example.com`
-  placeholders).
-
-**Status shows `PagerDuty: ⚠ Needs token`**
-- You set `pagerduty.enabled` to `true` but left `api_token` empty. Paste a
-  User API token (My Profile → User Settings → API Access), then click
-  **Check dependencies**. To turn PagerDuty off entirely, set `enabled` back to
-  `false`.
-
-**PagerDuty enabled but no incidents notify**
-- With auto-detect, confirm your token can reach the API. Only incidents
-  assigned to you (triggered/acknowledged) or your teams' incidents changed
-  within `window_minutes` are surfaced; already-resolved older incidents won't
-  re-notify.
-
-**Clicking a notification doesn't open anything**
-- Make sure you allowed notifications on first launch. If you denied it, re-enable
-  it (macOS: System Settings → Notifications → DevNotifier; Windows: Settings →
-  System → Notifications → Dev Notifier), then quit and relaunch.
-- **Windows:** the toast's **Open** button opens the link; make sure a default
-  browser is set.
-
-**"App is damaged" on launch (macOS)**
-- Run: `xattr -dr com.apple.quarantine /Applications/DevNotifier.app`
-
-**"Windows protected your PC" on launch (Windows)**
-- SmartScreen warns on unsigned apps. Click **More info** → **Run anyway**.
-
-**See the logs**
 ```bash
 # macOS
 tail -f ~/.config/dev-notifier/notifier.log
@@ -286,29 +243,33 @@ tail -f ~/.config/dev-notifier/notifier.log
 Get-Content -Wait "$env:APPDATA\dev-notifier\notifier.log"
 ```
 
----
+### Start‑at‑login internals
 
-## 8. Uninstall
+- **macOS** — a LaunchAgent at
+  `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`.
+- **Windows** — a value named `DevNotifier` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
-### macOS
+### macOS "is damaged" fix
 
-1. Quit from the menu.
-2. Turn off **Start at login** first (or delete
-   `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`).
-3. Delete `/Applications/DevNotifier.app`.
-4. Optionally remove settings and cache:
+```bash
+xattr -dr com.apple.quarantine /Applications/DevNotifier.app
+```
+
+### Uninstall
+
+**macOS**
+1. Quit from the menu, and turn off **Start at login**.
+2. Delete `/Applications/DevNotifier.app`.
+3. Optionally remove your data:
    ```bash
    rm -rf ~/.config/dev-notifier ~/Library/Caches/dev-notifier
    ```
 
-### Windows
-
-1. Quit from the tray menu.
-2. Turn off **Start at login** first (or delete the `DevNotifier` value under
-   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, e.g.
-   `reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v DevNotifier /f`).
-3. Delete the `DevNotifier-<version>.exe` you downloaded.
-4. Optionally remove settings and cache:
+**Windows**
+1. Quit from the tray menu, and turn off **Start at login**.
+2. Delete the `DevNotifier-<version>.exe` you downloaded.
+3. Optionally remove your data:
    ```powershell
    Remove-Item -Recurse -Force "$env:APPDATA\dev-notifier", "$env:LOCALAPPDATA\dev-notifier"
    ```
