@@ -7,8 +7,6 @@ used to exercise it on any platform.
 
 @author SteveZou
 """
-import importlib
-
 import pytest
 
 from platform_backend.base import MenuItem, TrayBackend

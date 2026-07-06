@@ -629,6 +629,10 @@ class NotifierApp:
             phases = poll_mod.collect_all(cfg, log=_log, since_ts=since_ts)
         except Exception as e:  # noqa: BLE001
             _log(f"ERROR collect_all: {e}")
+            # Bind the message here: ``e`` is scoped to this ``except`` block and
+            # is cleared once it exits, but ``apply_error`` may run later (on the
+            # main thread, deferred), so it must close over a plain string.
+            err_msg = f"Could not fetch updates: {e}"[:200]
 
             def apply_error(_):
                 if manual and self._checking:
@@ -637,7 +641,7 @@ class NotifierApp:
                     self._post_notification(
                         title="Dev Notifier",
                         subtitle="Check failed",
-                        message=f"Could not fetch updates: {e}"[:200],
+                        message=err_msg,
                         data={}, sound=False,
                     )
 
