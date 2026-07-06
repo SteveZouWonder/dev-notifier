@@ -57,14 +57,16 @@ native Action Center toasts via `winotify`.
 
 ## Configuration
 
-On first launch a config file is created at:
+On first launch a **simple** config file is created (only the fields you need to
+fill in — advanced options have sensible defaults and aren't shown):
 
 ```
 macOS:    ~/.config/dev-notifier/config.json
 Windows:  %APPDATA%\dev-notifier\config.json
 ```
 
-Open it (tray icon → **Open config file**) and fill in your details:
+Open it from the menu (tray icon → **Open config file**). To get started you
+usually only need three Jira values:
 
 ```json
 {
@@ -73,36 +75,22 @@ Open it (tray icon → **Open config file**) and fill in your details:
     "base_url": "https://your-domain.atlassian.net",
     "username": "you@example.com",
     "api_token": "<your Jira API token>"
-  },
-  "github": {
-    "enabled": true,
-    "login": ""
-  },
-  "pagerduty": {
-    "enabled": false,
-    "api_token": "",
-    "user_id": "",
-    "team_ids": []
-  },
-  "poll": {
-    "interval_seconds": 300,
-    "window_minutes": 10
   }
 }
 ```
 
 - **Jira token:** create one at
-  <https://id.atlassian.com/manage-profile/security/api-tokens>.
-- **GitHub:** no token needed — it uses the [`gh` CLI](https://cli.github.com).
-  Run `gh auth login` once. Leave `login` blank to auto-detect.
-- **PagerDuty:** set `enabled` to `true` and paste a **User API token**
-  (PagerDuty → *My Profile → User Settings → API Access → Create API User
-  Token*). Leave `user_id` and `team_ids` blank to auto-detect the current user
-  and their teams via `/users/me`.
-- **poll:** `interval_seconds` how often to check, `window_minutes` how far
-  back each check looks.
+  <https://id.atlassian.com/manage-profile/security/api-tokens>, then paste it
+  into `api_token`.
+- **GitHub** *(on by default)*: no token needed — it uses the
+  [`gh` CLI](https://cli.github.com). Run `gh auth login` once, or set
+  `"enabled": false` under `github` to turn it off.
+- **PagerDuty** *(off by default)*: set `"enabled": true` and paste a **User API
+  token** into `api_token`.
 
-The config file stays on your machine and is never committed.
+After editing, save and click **Check dependencies** in the menu. The config
+file stays on your machine and is never committed. For a step‑by‑step walkthrough
+and the full list of advanced options, see the **[Tutorial](TUTORIAL.md)**.
 
 ## Menu
 

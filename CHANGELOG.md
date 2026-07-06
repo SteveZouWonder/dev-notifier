@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows packaging and CI: added a PyInstaller spec (`packaging/dev-notifier-win.spec`) producing a one-file `DevNotifier.exe`, a packaging script (`packaging/windows_package.ps1`) that names it `DevNotifier-<version>.exe` (matched by the updater), a `test-windows` CI job running the suite on `windows-latest`, and a `build-windows` release job that builds the `.exe` and publishes it alongside the macOS DMG in the same GitHub Release (with combined `SHA256SUMS.txt`)
 - the tray/menu UI is now fully behind the platform backend: `notifier_app` is toolkit-neutral (no direct `rumps` import) and drives the active backend through its interface. macOS renders the menu/icon/notifications/timers via `rumps` exactly as before; Windows renders a real tray icon and right-click menu via `pystray` (with `Pillow` for icon images) plus `winotify` toasts. `pystray` and `Pillow` are install requirements only on Windows
 - documentation: the README and TUTORIAL now cover Windows alongside macOS — install (`.exe` / SmartScreen), the `gh` CLI via `winget`, the `%APPDATA%` config path, start-at-login via the `Run` registry entry, troubleshooting, and uninstall
+- friendlier onboarding for non-technical users: the first-run config file is now a **simple template** showing only the settings you fill in (Jira/GitHub/PagerDuty), each with a short plain-language note; advanced tuning options (`poll.*`, `jira.event_mode`, etc.) are omitted from the file but keep their built-in defaults. The TUTORIAL was reorganised into a click-only **Quick start** plus an **Advanced** section, and the README config example was slimmed to the three Jira fields most users need
+- a broken/typo'd config file is no longer silently discarded: the app still starts with defaults for that run, but your file is **left unchanged** and a note is written to the log so you can fix the typo without losing your edits
+
+### Fixed
+- on Windows the config/state/log files now live under `%APPDATA%\dev-notifier` (via the shared `paths` helper) instead of a `.config` folder in the home directory; macOS keeps `~/.config/dev-notifier` unchanged
 
 ## [v1.5.3] - 2026-07-06
 
