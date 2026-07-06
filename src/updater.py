@@ -31,6 +31,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import paths as _paths
+
 # GitHub repo that publishes the releases. Kept here (not in user config) so a
 # user's local config cannot point the updater at an arbitrary host.
 GITHUB_OWNER = "SteveZouWonder"
@@ -45,8 +47,14 @@ __version__ = "1.3.0"
 _USER_AGENT = f"{GITHUB_REPO}-updater"
 _HTTP_TIMEOUT = 15  # seconds
 _DMG_NAME_RE = re.compile(r"DevNotifier-.*\.dmg$", re.IGNORECASE)
+# Windows installer asset (published alongside the macOS DMG on the same
+# release). Matches e.g. DevNotifier-1.4.0-setup.exe or DevNotifier-1.4.0.exe.
+_EXE_NAME_RE = re.compile(r"DevNotifier-.*\.exe$", re.IGNORECASE)
 
-CACHE_DIR = Path.home() / "Library" / "Caches" / "dev-notifier"
+# Cache dir for downloaded installers. Resolved via the cross-platform paths
+# helper; on macOS this is exactly the historical ~/Library/Caches/dev-notifier
+# location, so existing behaviour and tests are unchanged.
+CACHE_DIR = _paths.cache_dir()
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -81,10 +89,12 @@ def is_frozen() -> bool:
 def current_version() -> str:
     """Version of the running app.
 
-    Frozen: read ``CFBundleShortVersionString`` from the bundle's Info.plist.
-    Source: the module ``__version__`` fallback.
+    Frozen on macOS: read ``CFBundleShortVersionString`` from the ``.app``
+    bundle's Info.plist. Frozen on Windows (and any other case): fall back to
+    the module ``__version__``, which the build keeps in sync with the release
+    tag. Source runs also use ``__version__`` (and skip update prompts anyway).
     """
-    if is_frozen():
+    if is_frozen() and sys.platform != "win32":
         exe = Path(sys.executable)  # .../DevNotifier.app/Contents/MacOS/DevNotifier
         for parent in exe.parents:
             if parent.suffix == ".app":
@@ -137,6 +147,21 @@ def _http_get(url: str, accept: str = "application/vnd.github+json") -> bytes:
         return resp.read()
 
 
+def _installer_regex(platform: str = None):
+    """Asset-name pattern for the current platform's installer.
+
+    macOS -> the ``.dmg``; Windows -> the ``.exe``. Other platforms have no
+    installer asset yet, so ``None`` is returned and the updater simply points
+    the user at the Releases page.
+    """
+    plat = platform if platform is not None else sys.platform
+    if plat == "win32":
+        return _EXE_NAME_RE
+    if plat == "darwin":
+        return _DMG_NAME_RE
+    return None
+
+
 def fetch_latest_release() -> dict:
     """Query the latest release. Returns a normalized dict or raises on failure.
 
@@ -146,22 +171,32 @@ def fetch_latest_release() -> dict:
           "version": "1.4.0",          # tag without leading 'v'
           "tag": "v1.4.0",
           "html_url": "https://.../releases/tag/v1.4.0",
-          "dmg_url": "https://.../DevNotifier-1.4.0.dmg" | None,
+          "dmg_url": "https://.../DevNotifier-1.4.0.dmg" | None,   # macOS asset
           "dmg_name": "DevNotifier-1.4.0.dmg" | None,
+          "installer_url": "https://.../<platform asset>" | None,  # this OS
+          "installer_name": "<platform asset name>" | None,
           "sha256_url": "https://.../SHA256SUMS.txt" | None,
         }
+
+    ``dmg_url``/``dmg_name`` are always the macOS asset (kept for
+    compatibility); ``installer_url``/``installer_name`` are the asset for the
+    *current* platform, which is what the downloader uses.
     """
     raw = _http_get(RELEASES_API)
     data = json.loads(raw.decode("utf-8"))
     tag = data.get("tag_name", "") or ""
     version = tag.lstrip("vV")
     dmg_url = dmg_name = sha_url = None
+    installer_url = installer_name = None
+    installer_re = _installer_regex()
     for asset in data.get("assets", []) or []:
         name = asset.get("name", "") or ""
         url = asset.get("browser_download_url")
         if _DMG_NAME_RE.search(name):
             dmg_url, dmg_name = url, name
-        elif name == "SHA256SUMS.txt":
+        if installer_re and installer_re.search(name):
+            installer_url, installer_name = url, name
+        if name == "SHA256SUMS.txt":
             sha_url = url
     return {
         "version": version,
@@ -169,6 +204,8 @@ def fetch_latest_release() -> dict:
         "html_url": data.get("html_url") or RELEASES_PAGE,
         "dmg_url": dmg_url,
         "dmg_name": dmg_name,
+        "installer_url": installer_url,
+        "installer_name": installer_name,
         "sha256_url": sha_url,
     }
 
@@ -201,6 +238,8 @@ def check_for_update(cfg: dict) -> dict:
         "html_url": RELEASES_PAGE,
         "dmg_url": None,
         "dmg_name": None,
+        "installer_url": None,
+        "installer_name": None,
         "sha256_url": None,
         "from_source": not is_frozen(),
         "error": None,
@@ -222,6 +261,8 @@ def check_for_update(cfg: dict) -> dict:
         "html_url": rel["html_url"],
         "dmg_url": rel["dmg_url"],
         "dmg_name": rel["dmg_name"],
+        "installer_url": rel.get("installer_url"),
+        "installer_name": rel.get("installer_name"),
         "sha256_url": rel["sha256_url"],
     })
     skipped = cfg.get("update", {}).get("skipped_version", "")
@@ -249,35 +290,55 @@ def _parse_sha256sums(text: str, dmg_name: str):
     return None
 
 
+def _open_installer(path: str) -> None:
+    """Open the downloaded installer with the OS default handler.
+
+    Windows uses ``os.startfile`` (launches the .exe installer); macOS shells
+    out to ``open`` (mounts the DMG volume). Kept tiny and side-effecting so the
+    download logic stays platform-neutral.
+    """
+    if sys.platform == "win32":
+        os.startfile(path)  # noqa: S606 - launching our own verified installer
+    else:
+        import subprocess
+
+        subprocess.run(["open", path], check=False)
+
+
 def download_and_open(info: dict, log=None) -> dict:
-    """Download the release DMG, verify SHA-256, then ``open`` it.
+    """Download the release installer, verify SHA-256, then open it.
 
     Blocking — call from a worker thread. Returns::
 
         {"ok": bool, "path": str | None, "error": str | None}
 
-    On success macOS opens the DMG volume; the user drags the new app into
-    /Applications (standard flow, avoids Gatekeeper issues from silent replace).
+    The asset is the current platform's installer: on macOS the DMG (the user
+    drags the new app into /Applications — avoids Gatekeeper issues from a
+    silent replace); on Windows the ``.exe`` setup, which is launched directly.
+
+    ``info`` may provide ``installer_url``/``installer_name`` (preferred,
+    per-platform) and/or the legacy ``dmg_url``/``dmg_name`` (macOS); the former
+    wins when present.
     """
     import hashlib
-    import subprocess
 
     def _log(m):
         if log:
             log(m)
 
-    dmg_url = info.get("dmg_url")
-    dmg_name = info.get("dmg_name") or "DevNotifier-latest.dmg"
-    if not dmg_url:
+    asset_url = info.get("installer_url") or info.get("dmg_url")
+    asset_name = (info.get("installer_name") or info.get("dmg_name")
+                  or "DevNotifier-latest")
+    if not asset_url:
         return {"ok": False, "path": None,
-                "error": "No DMG asset found in the latest release."}
+                "error": "No installer asset found in the latest release."}
 
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        dest = CACHE_DIR / dmg_name
+        dest = CACHE_DIR / asset_name
 
-        _log(f"UPDATE downloading {dmg_url}")
-        req = urllib.request.Request(dmg_url, headers={"User-Agent": _USER_AGENT})
+        _log(f"UPDATE downloading {asset_url}")
+        req = urllib.request.Request(asset_url, headers={"User-Agent": _USER_AGENT})
         with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT * 4, context=_SSL_CTX) as resp, \
                 dest.open("wb") as f:
             hasher = hashlib.sha256()
@@ -295,7 +356,7 @@ def download_and_open(info: dict, log=None) -> dict:
         if info.get("sha256_url"):
             try:
                 sums = _http_get(info["sha256_url"], accept="text/plain").decode("utf-8")
-                want = _parse_sha256sums(sums, dmg_name)
+                want = _parse_sha256sums(sums, asset_name)
             except (urllib.error.URLError, urllib.error.HTTPError,
                     TimeoutError, OSError, ValueError) as e:
                 _log(f"UPDATE WARN could not fetch checksums: {e}")
@@ -307,7 +368,7 @@ def download_and_open(info: dict, log=None) -> dict:
             return {"ok": False, "path": None,
                     "error": "Checksum mismatch — download discarded."}
 
-        subprocess.run(["open", str(dest)], check=False)
+        _open_installer(str(dest))
         return {"ok": True, "path": str(dest), "error": None}
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
             OSError, ValueError) as e:

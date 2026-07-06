@@ -16,8 +16,12 @@ import pytest
 
 
 @pytest.fixture
-def app_mod(fake_rumps, temp_home):
-    """Import notifier_app against the fake rumps + isolated home."""
+def app_mod(temp_home):
+    """Import notifier_app with an isolated home.
+
+    notifier_app is toolkit-neutral (it drives a platform backend), so no rumps
+    stub is needed for its logic; tests inject a FakeBackend into NotifierApp.
+    """
     import config as config_mod
     importlib.reload(config_mod)
     import notifier_app as app_mod
@@ -147,11 +151,14 @@ def test_assets_dir_frozen_no_candidate_dir(app_mod, monkeypatch, tmp_path):
     assert d.endswith("menubar")
 
 
-def test_main_runs_app(app_mod, monkeypatch):
+def test_main_runs_app(app_mod, fake_backend, monkeypatch):
     ran = {"run": False}
     monkeypatch.setattr(app_mod.NotifierApp, "run",
                         lambda self: ran.__setitem__("run", True), raising=False)
     monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
+    # main() builds a NotifierApp with the platform backend; stub get_backend so
+    # no GUI toolkit is required, then assert run() was invoked.
+    monkeypatch.setattr(app_mod, "get_backend", lambda: fake_backend)
     app_mod.main()
     assert ran["run"] is True
 
@@ -193,41 +200,28 @@ def test_save_state_swallows_oserror(app_mod, monkeypatch):
     app_mod._save_state({"seen": {}})  # no exception
 
 
-def test_on_click_opens_url(app_mod, monkeypatch):
-    opened = {}
-    monkeypatch.setattr(app_mod.subprocess, "run",
-                        lambda args, **k: opened.setdefault("args", args))
-
-    class Info:
-        data = {"url": "https://example.com"}
-
-    app_mod._on_click(Info())
-    assert opened["args"] == ["open", "https://example.com"]
-
-
-def test_on_click_no_url_does_nothing(app_mod, monkeypatch):
-    called = {"run": False}
-    monkeypatch.setattr(app_mod.subprocess, "run",
-                        lambda *a, **k: called.__setitem__("run", True))
-
-    class Info:
-        data = {}
-
-    app_mod._on_click(Info())
-    assert called["run"] is False
-
-
 # ---------------------------------------------------------------------------
 # NotifierApp instantiation + behavior
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def app(app_mod, monkeypatch):
-    """A NotifierApp instance with icons and timers stubbed for headless tests."""
+def app(app_mod, fake_backend, monkeypatch):
+    """A NotifierApp instance wired to a recording FakeBackend for headless
+    tests. Icons are stubbed off so behaviour is deterministic."""
     monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
-    # Config already written by ensure_config; instantiate the app.
-    instance = app_mod.NotifierApp()
+    # Config already written by ensure_config; instantiate with the fake backend.
+    instance = app_mod.NotifierApp(backend=fake_backend)
     return instance
+
+
+def test_app_run_delegates_to_backend(app):
+    app.run()
+    assert app.backend.ran is True
+
+
+def test_app_quit_delegates_to_backend(app):
+    app._quit(None)
+    assert app.backend.quit_called is True
 
 
 def test_app_init_builds_menu_and_defaults(app):
@@ -238,21 +232,21 @@ def test_app_init_builds_menu_and_defaults(app):
     assert "Check now" in titles
 
 
-def test_app_theme_alias_migration(app_mod, monkeypatch):
+def test_app_theme_alias_migration(app_mod, fake_backend, monkeypatch):
     monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
     cfg = app_mod.cfg_mod.ensure_config()
     cfg["theme"] = "Bell"  # legacy name
     app_mod._save_config(cfg)
-    instance = app_mod.NotifierApp()
+    instance = app_mod.NotifierApp(backend=fake_backend)
     assert instance.cfg["theme"] == "Yellow"
 
 
-def test_app_invalid_theme_falls_back(app_mod, monkeypatch):
+def test_app_invalid_theme_falls_back(app_mod, fake_backend, monkeypatch):
     monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
     cfg = app_mod.cfg_mod.ensure_config()
     cfg["theme"] = "Nonexistent"
     app_mod._save_config(cfg)
-    instance = app_mod.NotifierApp()
+    instance = app_mod.NotifierApp(backend=fake_backend)
     assert instance.cfg["theme"] == app_mod.DEFAULT_THEME
 
 
@@ -276,10 +270,7 @@ def test_set_theme_no_icon_uses_emoji(app, app_mod, monkeypatch):
     assert app.title == "\U0001f514"
 
 
-def test_recent_add_open_remove_clear(app, app_mod, monkeypatch):
-    opened = {}
-    monkeypatch.setattr(app_mod.subprocess, "run",
-                        lambda args, **k: opened.setdefault("args", args))
+def test_recent_add_open_remove_clear(app):
     app.recent = [{"id": 1, "label": "x", "url": "https://a"}]
     app._build_menu()
 
@@ -291,7 +282,7 @@ def test_recent_add_open_remove_clear(app, app_mod, monkeypatch):
         entry_id = 1
 
     app._open_recent(Sender())
-    assert opened["args"] == ["open", "https://a"]
+    assert app.backend.opened_urls[-1] == "https://a"
 
     # remove
     app._remove_recent(Sender())
@@ -303,16 +294,12 @@ def test_recent_add_open_remove_clear(app, app_mod, monkeypatch):
     assert app.recent == []
 
 
-def test_open_recent_missing_entry_noop(app, app_mod, monkeypatch):
-    called = {"run": False}
-    monkeypatch.setattr(app_mod.subprocess, "run",
-                        lambda *a, **k: called.__setitem__("run", True))
-
+def test_open_recent_missing_entry_noop(app):
     class Sender:
         entry_id = 999
 
     app._open_recent(Sender())
-    assert called["run"] is False
+    assert app.backend.opened_urls == []
 
 
 def test_status_menuitem_pending(app):
@@ -424,7 +411,8 @@ def test_theme_submenu_set_icon_error_is_swallowed(app, app_mod, monkeypatch):
     def boom(self, *a, **k):
         raise RuntimeError("bad icon")
 
-    monkeypatch.setattr(app_mod.rumps.MenuItem, "set_icon", boom)
+    from platform_backend.base import MenuItem
+    monkeypatch.setattr(MenuItem, "set_icon", boom)
     parent = app._theme_submenu()  # no exception
     assert parent._children
 
@@ -436,67 +424,57 @@ def test_skip_this_version(app, app_mod):
     assert app.update_info["available"] is False
 
 
-def test_open_release_page(app, app_mod, monkeypatch):
-    opened = {}
-    monkeypatch.setattr(app_mod.subprocess, "run",
-                        lambda args, **k: opened.setdefault("args", args))
+def test_open_release_page(app):
     app.update_info = {"html_url": "https://releases"}
     app._open_release_page(None)
-    assert opened["args"] == ["open", "https://releases"]
+    assert app.backend.opened_urls[-1] == "https://releases"
 
 
-def test_open_config(app, app_mod, monkeypatch):
-    opened = {}
-    monkeypatch.setattr(app_mod.subprocess, "run",
-                        lambda args, **k: opened.setdefault("args", args))
+def test_open_config(app):
     app._open_config(None)
-    assert opened["args"][0] == "open"
+    # Opens the config file path via the backend.
+    assert app.backend.opened_urls[-1].endswith("config.json")
 
 
-def test_notify_records_recent(app, app_mod):
-    app_mod.rumps._notifications_sent.clear()
+def test_notify_records_recent(app):
     it = {"title": "Jira", "subtitle": "ACME-1 · Open",
           "message": "updated", "url": "https://x"}
     app._notify(it)
-    assert app_mod.rumps._notifications_sent[-1]["title"] == "Jira"
+    assert app.backend.notifications[-1]["title"] == "Jira"
 
 
-def test_notify_swallows_errors(app, app_mod, monkeypatch):
+def test_notify_swallows_errors(app, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("notif failed")
 
-    monkeypatch.setattr(app_mod.rumps, "notification", boom)
+    monkeypatch.setattr(app.backend, "notify", boom)
     # Must not raise even if the notification backend fails.
     app._notify({"title": "t", "subtitle": "s", "message": "m", "url": ""})
 
 
 def test_post_notification_uses_theme_icon(app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
     app.cfg["theme"] = "Purple"
     monkeypatch.setattr(app_mod, "_theme_icon", lambda t: f"/icons/{t}.png")
     app._post_notification(title="t", subtitle="s", message="m", data={})
-    sent = app_mod.rumps._notifications_sent[-1]
+    sent = app.backend.notifications[-1]
     assert sent["icon"] == "/icons/Purple.png"
 
 
 def test_post_notification_no_icon_when_missing(app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
     monkeypatch.setattr(app_mod, "_theme_icon", lambda t: None)
     app._post_notification(title="t", subtitle="s", message="m", data={})
-    assert app_mod.rumps._notifications_sent[-1]["icon"] is None
+    assert app.backend.notifications[-1]["icon"] is None
 
 
 def test_post_notification_explicit_icon_preserved(app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
     monkeypatch.setattr(app_mod, "_theme_icon", lambda t: "/icons/theme.png")
     app._post_notification(title="t", subtitle="s", message="m", data={},
                            icon="/custom.png")
-    assert app_mod.rumps._notifications_sent[-1]["icon"] == "/custom.png"
+    assert app.backend.notifications[-1]["icon"] == "/custom.png"
 
 
 def test_post_notification_follows_theme_switch(app, app_mod, monkeypatch):
     """Switching the theme also switches the icon used for notifications."""
-    app_mod.rumps._notifications_sent.clear()
     monkeypatch.setattr(app_mod, "_theme_icon", lambda t: f"/icons/{t}.png")
 
     def _switch(name):
@@ -505,48 +483,40 @@ def test_post_notification_follows_theme_switch(app, app_mod, monkeypatch):
 
     _switch("Purple")
     app._post_notification(title="t", subtitle="s", message="m", data={})
-    assert app_mod.rumps._notifications_sent[-1]["icon"] == "/icons/Purple.png"
+    assert app.backend.notifications[-1]["icon"] == "/icons/Purple.png"
 
     _switch("Green")
     app._post_notification(title="t", subtitle="s", message="m", data={})
-    assert app_mod.rumps._notifications_sent[-1]["icon"] == "/icons/Green.png"
+    assert app.backend.notifications[-1]["icon"] == "/icons/Green.png"
 
 
-def test_toggle_login_item(app, app_mod, monkeypatch):
-    state = {"enabled": False}
-    monkeypatch.setattr(app_mod.deps_mod, "login_item_enabled",
-                        lambda: state["enabled"])
-    monkeypatch.setattr(app_mod.deps_mod, "enable_login_item",
-                        lambda: state.update(enabled=True) or True)
-    monkeypatch.setattr(app_mod.deps_mod, "disable_login_item",
-                        lambda: state.update(enabled=False) or True)
-
+def test_toggle_login_item(app):
+    # The FakeBackend tracks the login-item flag in memory.
+    assert app.backend.login_item_enabled() is False
     app._toggle_login_item(None)  # enable
-    assert state["enabled"] is True
+    assert app.backend.login_item_enabled() is True
     app._toggle_login_item(None)  # disable
-    assert state["enabled"] is False
+    assert app.backend.login_item_enabled() is False
 
 
 def test_run_on_main_executes_fn(app):
-    # _run_on_main marshals fn onto the main run loop via AppHelper.callAfter.
-    # The stubbed callAfter runs it synchronously, so fn must have executed.
+    # _run_on_main marshals fn onto the main thread via the backend. The
+    # FakeBackend runs it synchronously, so fn must have executed.
     ran = {"done": False}
     app._run_on_main(lambda _t: ran.__setitem__("done", True))
     assert ran["done"] is True
 
 
-def test_warn_if_unmet_when_not_ok(app, app_mod):
-    app_mod.rumps._notifications_sent.clear()
+def test_warn_if_unmet_when_not_ok(app):
     app.dep_status = {"ok": False, "problems": ["fix this"]}
     app._warn_if_unmet()
-    assert any("setup needed" in n["title"] for n in app_mod.rumps._notifications_sent)
+    assert any("setup needed" in n["title"] for n in app.backend.notifications)
 
 
-def test_warn_if_unmet_when_ok_is_silent(app, app_mod):
-    app_mod.rumps._notifications_sent.clear()
+def test_warn_if_unmet_when_ok_is_silent(app):
     app.dep_status = {"ok": True, "problems": []}
     app._warn_if_unmet()
-    assert app_mod.rumps._notifications_sent == []
+    assert app.backend.notifications == []
 
 
 # ---------------------------------------------------------------------------
@@ -555,8 +525,9 @@ def test_warn_if_unmet_when_ok_is_silent(app, app_mod):
 
 @pytest.fixture
 def sync_app(app, app_mod, monkeypatch):
-    """App variant that runs background workers synchronously and applies main-
-    thread callbacks immediately, so we can assert on the results directly."""
+    """App variant that runs background workers synchronously so we can assert
+    on the results directly. The FakeBackend already applies run_on_main
+    callbacks inline."""
     class SyncThread:
         def __init__(self, target=None, daemon=None, **k):
             self._target = target
@@ -566,8 +537,6 @@ def sync_app(app, app_mod, monkeypatch):
                 self._target()
 
     monkeypatch.setattr(app_mod.threading, "Thread", SyncThread)
-    # _run_on_main normally schedules a Timer; run the fn immediately instead.
-    monkeypatch.setattr(app, "_run_on_main", lambda fn: fn(None))
     return app
 
 
@@ -585,102 +554,102 @@ def test_initial_check_applies_status(sync_app, app_mod, monkeypatch):
 
 
 def test_recheck_deps_reports_problems(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: {"problems": ["boom"], "ok": False,
                                      "pending": False, "jira_ok": False,
                                      "jira": {"enabled": False}, "github_ok": False})
     sync_app._recheck_deps(None)
     assert any("dependency check" in n["title"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_recheck_deps_all_good(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: {"problems": [], "ok": True,
                                      "pending": False, "jira_ok": True,
                                      "jira": {"enabled": True}, "github_ok": True})
     sync_app._recheck_deps(None)
     assert any("All good" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_run_update_check_available_notifies(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     info = {"available": True, "latest": "9.0.0", "html_url": "u",
             "from_source": False, "error": None, "current": "1.0.0"}
     monkeypatch.setattr(app_mod.updater_mod, "check_for_update", lambda cfg: info)
     sync_app._run_update_check(notify=True)
     assert any("update available" in n["title"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_run_update_check_manual_up_to_date(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     info = {"available": False, "from_source": False, "error": None,
             "current": "1.3.0", "latest": ""}
     monkeypatch.setattr(app_mod.updater_mod, "check_for_update", lambda cfg: info)
     sync_app._run_update_check(notify=True, manual=True)
     assert any("Up to date" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_run_update_check_manual_from_source(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     info = {"available": False, "from_source": True, "error": None,
             "current": "1.3.0", "latest": ""}
     monkeypatch.setattr(app_mod.updater_mod, "check_for_update", lambda cfg: info)
     sync_app._run_update_check(notify=True, manual=True)
     assert any("Running from source" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_run_update_check_manual_error(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     info = {"available": False, "from_source": False, "error": "net down",
             "current": "1.3.0", "latest": ""}
     monkeypatch.setattr(app_mod.updater_mod, "check_for_update", lambda cfg: info)
     sync_app._run_update_check(notify=True, manual=True)
     assert any("Couldn't check" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_download_update_success(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     sync_app.update_info = {"latest": "2.0.0", "html_url": "u"}
     monkeypatch.setattr(app_mod.updater_mod, "download_and_open",
                         lambda info, log=None: {"ok": True, "path": "/x", "error": None})
     sync_app._download_update(None)
     assert any("update ready" in n["title"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_download_update_failure(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     sync_app.update_info = {"latest": "2.0.0", "html_url": "u"}
     monkeypatch.setattr(app_mod.updater_mod, "download_and_open",
                         lambda info, log=None: {"ok": False, "path": None,
                                                 "error": "boom"})
     sync_app._download_update(None)
     assert any("update failed" in n["title"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_download_update_guard_when_already_downloading(sync_app, app_mod):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     sync_app._downloading = True
     sync_app._download_update(None)
     assert any("Already downloading" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_on_tick_guard_when_polling(sync_app, app_mod):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     sync_app._polling = True
     sync_app.on_tick(None, manual=True)
     assert any("Already checking" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def _full_dep_status(ok, problems):
@@ -690,17 +659,17 @@ def _full_dep_status(ok, problems):
 
 
 def test_poll_once_unusable_source(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(False, ["configure first"]))
     sync_app._poll_once(manual=True)
     assert any("Nothing to check" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_poll_once_processes_new_items(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
@@ -795,7 +764,7 @@ def test_warn_if_unmet_swallows_notification_error(app, app_mod, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("notif backend down")
 
-    monkeypatch.setattr(app_mod.rumps, "notification", boom)
+    monkeypatch.setattr(app.backend, "notify", boom)
     app.dep_status = {"ok": False, "problems": ["x"]}
     # Even if the notification fails, _warn_if_unmet must not raise.
     app._warn_if_unmet()
@@ -821,7 +790,7 @@ def test_on_tick_spawns_worker(app, app_mod, monkeypatch):
 
 
 def test_poll_once_manual_no_new_items_notifies(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
@@ -834,7 +803,7 @@ def test_poll_once_manual_no_new_items_notifies(sync_app, app_mod, monkeypatch):
     sync_app.recent = []
     sync_app._poll_once(manual=True)
     assert any("no new items" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 # ---------------------------------------------------------------------------
@@ -956,7 +925,7 @@ def test_poll_once_manual_exits_checking_on_unusable(sync_app, app_mod, monkeypa
 
 
 def test_poll_once_manual_exits_checking_on_error(sync_app, app_mod, monkeypatch):
-    app_mod.rumps._notifications_sent.clear()
+    sync_app.backend.notifications.clear()
     monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
@@ -973,7 +942,7 @@ def test_poll_once_manual_exits_checking_on_error(sync_app, app_mod, monkeypatch
     assert exited["v"] is True
     # Manual runs also surface a "Check failed" notification on error.
     assert any("Check failed" in n["subtitle"]
-               for n in app_mod.rumps._notifications_sent)
+               for n in sync_app.backend.notifications)
 
 
 def test_poll_once_nonmanual_does_not_exit_checking(sync_app, app_mod, monkeypatch):

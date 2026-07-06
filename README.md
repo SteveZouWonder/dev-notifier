@@ -4,7 +4,7 @@
 
 # Dev Notifier
 
-### A tiny macOS menu-bar app that watches Jira, GitHub & PagerDuty for things relevant to you and shows clickable desktop notifications
+### A tiny macOS & Windows tray app that watches Jira, GitHub & PagerDuty for things relevant to you and shows clickable desktop notifications
 
 [![Release](https://img.shields.io/github/v/release/SteveZouWonder/dev-notifier)](../../releases)
 [![Python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org/)
@@ -15,7 +15,8 @@
 
 ---
 
-Dev Notifier lives in your menu bar and polls, every few minutes:
+Dev Notifier lives in your menu bar (macOS) or system tray (Windows) and polls,
+every few minutes:
 
 - **Jira** — issues where you are the assignee, reporter, or watcher that were
   recently updated, plus comments mentioning you.
@@ -27,15 +28,15 @@ Dev Notifier lives in your menu bar and polls, every few minutes:
   teams' incidents changed recently, so acknowledge / resolve / escalate status
   changes resurface (via the PagerDuty REST API).
 
-When something new shows up it raises a **native macOS notification**, and
+When something new shows up it raises a **native desktop notification**, and
 **clicking the notification opens the Jira issue / PR / incident in your
-browser**.
-
-Because it's a properly bundled `.app` with its own bundle identifier, macOS
-grants it real notification permission — unlike ad-hoc `osascript`/CLI
-notifications, its click action actually works.
+browser**. On macOS it's a properly bundled `.app` with its own bundle
+identifier (so macOS grants real notification permission); on Windows it uses
+native Action Center toasts via `winotify`.
 
 ## Download & Install
+
+### macOS
 
 1. Grab the latest `DevNotifier-<version>.dmg` from
    [Releases](../../releases).
@@ -45,15 +46,25 @@ notifications, its click action actually works.
    `xattr -dr com.apple.quarantine /Applications/DevNotifier.app`.)
 4. Allow notifications when prompted.
 
+### Windows
+
+1. Grab the latest `DevNotifier-<version>.exe` from
+   [Releases](../../releases).
+2. Run it. This is an unsigned open-source build, so SmartScreen may warn
+   ("Windows protected your PC" → **More info** → **Run anyway**).
+3. The app appears in the system tray (right-click for the menu). Allow
+   notifications when prompted.
+
 ## Configuration
 
 On first launch a config file is created at:
 
 ```
-~/.config/dev-notifier/config.json
+macOS:    ~/.config/dev-notifier/config.json
+Windows:  %APPDATA%\dev-notifier\config.json
 ```
 
-Open it (menu-bar icon → **Open config file**) and fill in your details:
+Open it (tray icon → **Open config file**) and fill in your details:
 
 ```json
 {
@@ -99,8 +110,9 @@ The config file stays on your machine and is never committed.
 - **Status:** — shows whether Jira / GitHub / PagerDuty are ready; click to re-check.
 - **Recent:** — the last items seen; hover → **Open** / **Remove**.
 - **Clear all recent** — empty the list.
-- **Theme ▸** — switch the menu-bar icon color.
-- **Start at login** — toggle auto-start (installs/removes a LaunchAgent).
+- **Theme ▸** — switch the tray icon color.
+- **Start at login** — toggle auto-start (macOS: a LaunchAgent; Windows: a
+  per-user `Run` registry entry).
 - **Check dependencies** — re-run the gh / Jira / PagerDuty checks.
 - **Open config file** — edit your settings.
 - **Quit**.
@@ -117,15 +129,23 @@ bash scripts/doctor.sh
 
 ### Start at login
 
-Enable **Start at login** to auto-launch on login. It writes a per-user
-LaunchAgent to `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`; toggling
-it off removes that file. Nothing is installed system-wide.
+Enable **Start at login** to auto-launch on login. On macOS it writes a per-user
+LaunchAgent to `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`; on Windows
+it adds a per-user value under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Toggling it off removes the
+entry. Nothing is installed system-wide.
 
 See the full [Tutorial](TUTORIAL.md) for setup, troubleshooting, and uninstall.
 
 ## Build from source
 
-Requires Python 3.12+ and (for packaging) `create-dmg` (`brew install create-dmg`).
+Requires Python 3.12+. Platform dependencies (`rumps` on macOS; `pystray` +
+`Pillow` + `winotify` on Windows) are selected automatically by
+`requirements.txt` markers.
+
+### macOS
+
+Needs `create-dmg` (`brew install create-dmg`) for packaging.
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
@@ -141,9 +161,26 @@ APP_VERSION=1.0.0 bash packaging/macos_package.sh
 # -> dist/DevNotifier-1.0.0.dmg
 ```
 
+### Windows
+
+```powershell
+python -m venv venv; .\venv\Scripts\Activate.ps1
+pip install -r requirements-build.txt
+
+# Run directly:
+python launcher.py
+
+# Or build the one-file .exe:
+$env:APP_VERSION = "1.0.0"
+pyinstaller packaging/dev-notifier-win.spec --noconfirm
+pwsh packaging/windows_package.ps1
+# -> dist/DevNotifier-1.0.0.exe
+```
+
 ## Releasing
 
-Push a tag and GitHub Actions builds and publishes the DMG:
+Push a tag and GitHub Actions builds and publishes both the macOS DMG and the
+Windows EXE (with a combined `SHA256SUMS.txt`) to the same Release:
 
 ```bash
 git tag v1.0.0 && git push origin v1.0.0
