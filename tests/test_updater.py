@@ -98,6 +98,8 @@ def test_current_version_frozen_reads_info_plist(updater_mod, monkeypatch, tmp_p
     with plist.open("wb") as f:
         plistlib.dump({"CFBundleShortVersionString": "9.9.9"}, f)
 
+    # The Info.plist path is macOS-only (guarded by sys.platform != "win32").
+    monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
     monkeypatch.setattr(updater_mod, "is_frozen", lambda: True)
     monkeypatch.setattr(updater_mod.sys, "executable",
                         str(macos / "DevNotifier"), raising=False)
@@ -110,6 +112,7 @@ def test_current_version_frozen_bad_plist_falls_back(updater_mod, monkeypatch, t
     macos.mkdir(parents=True)
     (app / "Contents" / "Info.plist").write_text("not a plist", encoding="utf-8")
 
+    monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
     monkeypatch.setattr(updater_mod, "is_frozen", lambda: True)
     monkeypatch.setattr(updater_mod.sys, "executable",
                         str(macos / "DevNotifier"), raising=False)
@@ -329,6 +332,9 @@ def test_download_and_open_no_dmg_url(updater_mod):
 
 
 def test_download_and_open_success_no_checksum(updater_mod, monkeypatch, temp_home):
+    # macOS flavour: the DMG is opened via `open` (subprocess). Pin the platform
+    # so _open_installer takes the macOS branch on any CI runner.
+    monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
     payload = b"dmg-bytes"
     monkeypatch.setattr(updater_mod.urllib.request, "urlopen",
                         lambda *a, **k: _FakeDownloadResp([payload]))
@@ -353,6 +359,7 @@ def test_download_and_open_success_no_checksum(updater_mod, monkeypatch, temp_ho
 
 
 def test_download_and_open_checksum_match(updater_mod, monkeypatch, temp_home):
+    monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
     payload = b"verified-bytes"
     digest = _sha256(payload)
     monkeypatch.setattr(updater_mod.urllib.request, "urlopen",
@@ -394,6 +401,7 @@ def test_download_and_open_checksum_mismatch_discards(updater_mod, monkeypatch, 
 
 
 def test_download_and_open_checksum_fetch_error_is_best_effort(updater_mod, monkeypatch, temp_home):
+    monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
     import urllib.error
     payload = b"bytes"
     monkeypatch.setattr(updater_mod.urllib.request, "urlopen",

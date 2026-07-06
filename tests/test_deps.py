@@ -6,6 +6,7 @@ machine is touched.
 @author SteveZou
 """
 import importlib
+import sys
 
 import pytest
 
@@ -22,11 +23,14 @@ def deps_mod(temp_home):
 # ---------------------------------------------------------------------------
 
 def test_augmented_env_appends_common_paths(deps_mod, monkeypatch):
+    import os
     monkeypatch.setenv("PATH", "/usr/bin")
     env = deps_mod.augmented_env()
-    assert "/opt/homebrew/bin" in env["PATH"].split(":")
+    # augmented_env joins with os.pathsep (':' on POSIX, ';' on Windows).
+    parts = env["PATH"].split(os.pathsep)
+    assert "/opt/homebrew/bin" in parts
     # Existing entries are preserved and not duplicated.
-    assert env["PATH"].split(":").count("/usr/bin") == 1
+    assert parts.count("/usr/bin") == 1
 
 
 def test_gh_path_falls_back_to_bare_gh(deps_mod, monkeypatch):
@@ -261,6 +265,9 @@ def test_app_launch_target_from_source(deps_mod, monkeypatch):
     assert target[1].endswith("launcher.py")
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX .app bundle path semantics; deps LaunchAgent "
+                           "handling is macOS-only")
 def test_app_launch_target_frozen_app_bundle(deps_mod, monkeypatch):
     # Frozen inside a .app bundle -> use `open <AppBundle>`.
     monkeypatch.setattr(deps_mod.sys, "frozen", True, raising=False)
