@@ -22,6 +22,17 @@ DEFAULT_CONFIG = {
         "username": "you@example.com",
         "api_token": "",
         "_comment": "Create a token at https://id.atlassian.com/manage-profile/security/api-tokens",
+        "event_mode": True,
+        "event_fields": ["status", "assignee"],
+        "_event_comment": "event_mode: notify per changelog event (whitelisted "
+                          "field changes + each comment), matching Jira's "
+                          "notification-feed granularity, instead of one "
+                          "notification per updated issue. event_fields "
+                          "whitelists which changelog fields trigger a "
+                          "notification (Jira field names, e.g. status, "
+                          "assignee, priority, resolution); comments are always "
+                          "included. Set event_mode false for the legacy "
+                          "issue-level behaviour.",
     },
     "github": {
         "enabled": True,

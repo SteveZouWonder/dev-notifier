@@ -48,6 +48,31 @@ _SSL_CTX = _ssl_context()
 # Jira
 # ---------------------------------------------------------------------------
 
+# Jira timestamps come back like "2026-07-05T20:57:15.858-0400" — an offset
+# *without* a colon, which datetime.fromisoformat() rejects on Python < 3.11.
+_TZ_FIX = re.compile(r"([+-]\d{2})(\d{2})$")
+
+
+def _parse_jira_dt(s):
+    """Parse a Jira timestamp to an aware UTC datetime; ``None`` on failure.
+
+    Handles a trailing ``Z``, offsets without a colon (``-0400``) and with a
+    colon (``-04:00``), and naive timestamps (treated as UTC). Always returns a
+    UTC-normalized aware datetime so callers can compare safely.
+    """
+    if not s:
+        return None
+    s = s.strip().replace("Z", "+00:00")
+    s = _TZ_FIX.sub(r"\1:\2", s)
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _jira_search(cfg: dict, window_min: int) -> list:
     jira = cfg.get("jira", {})
     base = jira.get("base_url", "").rstrip("/")
@@ -65,6 +90,9 @@ def _jira_search(cfg: dict, window_min: int) -> list:
         "jql": jql,
         "maxResults": 50,
         "fields": ["summary", "status", "updated", "comment"],
+        # Inline changelog so event mode needs no extra request per issue
+        # (must be a string; passing a list returns HTTP 400).
+        "expand": "changelog",
     }).encode()
     b64 = base64.b64encode(f"{user}:{token}".encode()).decode()
     req = urllib.request.Request(url, data=payload, method="POST", headers={
@@ -80,13 +108,137 @@ def _jira_search(cfg: dict, window_min: int) -> list:
         return []
 
 
-def jira_items(cfg: dict, window_min: int) -> list:
+def _jira_changelog(cfg: dict, key: str) -> list:
+    """Fetch the full changelog for one issue (used when the inline copy in the
+    search response is paginated/truncated). Returns a list of history dicts.
+    """
     jira = cfg.get("jira", {})
-    if not jira.get("enabled"):
-        return []
     base = jira.get("base_url", "").rstrip("/")
     user = jira.get("username", "")
-    issues = _jira_search(cfg, window_min)
+    token = jira.get("api_token", "")
+    if not (base and user and token):
+        return []
+    url = f"{base}/rest/api/3/issue/{key}/changelog?maxResults=100"
+    b64 = base64.b64encode(f"{user}:{token}".encode()).decode()
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Basic {b64}",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+            return json.loads(resp.read().decode()).get("values", [])
+    except Exception as e:  # noqa: BLE001
+        _log(f"ERROR jira_changelog {key}: {e}")
+        return []
+
+
+def _format_change(field: str, from_str, to_str) -> str:
+    """Human-readable one-liner for a changelog field change."""
+    frm = from_str if from_str else "∅"
+    to = to_str if to_str else "∅"
+    return f"{field}: {frm} → {to}"
+
+
+def _issue_histories(issue: dict, cfg: dict) -> list:
+    """Return the changelog histories for an issue, fetching the full log when
+    the inline copy from the search response was paginated.
+    """
+    cl = issue.get("changelog") or {}
+    histories = cl.get("histories", [])
+    total = cl.get("total")
+    if total is not None and total > len(histories):
+        full = _jira_changelog(cfg, issue.get("key", ""))
+        if full:
+            return full
+    return histories
+
+
+def _events_from_changelog(issue, cfg, window_start, whitelist):
+    """Yield event dicts for whitelisted changelog field changes in-window."""
+    key = issue.get("key", "")
+    f = issue.get("fields", {})
+    summary = f.get("summary", "")
+    status = (f.get("status") or {}).get("name", "")
+    events = []
+    for h in _issue_histories(issue, cfg):
+        ts = _parse_jira_dt(h.get("created", ""))
+        if ts is None or ts < window_start:
+            continue
+        author = (h.get("author") or {}).get("displayName", "")
+        for it in h.get("items", []):
+            field = it.get("field", "")
+            if field not in whitelist:
+                continue
+            events.append({
+                "key": key, "summary": summary, "status": status,
+                "kind": field, "event_id": f"cl:{h.get('id', '')}:{field}",
+                "ts": ts, "author": author,
+                "text": _format_change(field, it.get("fromString"),
+                                        it.get("toString")),
+            })
+    return events
+
+
+def _events_from_comments(issue, cfg, window_start):
+    """Yield one event dict per in-window comment on the issue."""
+    key = issue.get("key", "")
+    f = issue.get("fields", {})
+    summary = f.get("summary", "")
+    status = (f.get("status") or {}).get("name", "")
+    user = cfg.get("jira", {}).get("username", "")
+    handle = user.split("@")[0].lower() if "@" in user else user.lower()
+    events = []
+    for c in (f.get("comment", {}) or {}).get("comments", []):
+        ts = _parse_jira_dt(c.get("created", ""))
+        if ts is None or ts < window_start:
+            continue
+        body = json.dumps(c.get("body", ""))
+        mentioned = (handle and handle in body.lower()) or "mention" in body
+        events.append({
+            "key": key, "summary": summary, "status": status,
+            "kind": "comment", "event_id": f"comment:{c.get('id', '')}",
+            "ts": ts,
+            "author": (c.get("author") or {}).get("displayName", ""),
+            "text": "mentioned you" if mentioned else "commented",
+        })
+    return events
+
+
+def _event_to_item(ev: dict, base: str) -> dict:
+    """Map an internal event dict to the notification item contract."""
+    key = ev["key"]
+    author = f" by {ev['author']}" if ev.get("author") else ""
+    return {
+        "fp": f"jira:{key}:{ev['event_id']}",
+        "title": "Jira",
+        "subtitle": f"{key} · {ev['status']}",
+        "message": f"[{ev['kind']}] {ev['text']}{author} — {ev['summary']}",
+        "url": f"{base}/browse/{key}",
+    }
+
+
+def _jira_items_events(cfg: dict, window_min: int, issues: list) -> list:
+    """Event-level Jira items: one notification per changelog change / comment,
+    matching Jira's notification-feed granularity.
+    """
+    jira = cfg.get("jira", {})
+    base = jira.get("base_url", "").rstrip("/")
+    whitelist = set(jira.get("event_fields", ["status", "assignee"]))
+    window_start = datetime.now(timezone.utc) - timedelta(minutes=window_min)
+    events = []
+    for issue in issues:
+        events += _events_from_changelog(issue, cfg, window_start, whitelist)
+        events += _events_from_comments(issue, cfg, window_start)
+    # Oldest first for stable notification ordering.
+    events.sort(key=lambda e: e["ts"])
+    return [_event_to_item(ev, base) for ev in events]
+
+
+def _jira_items_legacy(cfg: dict, window_min: int, issues: list) -> list:
+    """Legacy issue-level behaviour: one notification per updated issue."""
+    jira = cfg.get("jira", {})
+    base = jira.get("base_url", "").rstrip("/")
+    user = jira.get("username", "")
     window_start = datetime.now(timezone.utc) - timedelta(minutes=window_min)
     items = []
     for issue in issues:
@@ -97,12 +249,8 @@ def jira_items(cfg: dict, window_min: int) -> list:
         updated = f.get("updated", "")
         mentioned = False
         for c in (f.get("comment", {}) or {}).get("comments", []):
-            created = c.get("created", "")
-            try:
-                cdt = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if cdt < window_start:
+            cdt = _parse_jira_dt(c.get("created", ""))
+            if cdt is None or cdt < window_start:
                 continue
             body = json.dumps(c.get("body", ""))
             handle = user.split("@")[0].lower() if "@" in user else user.lower()
@@ -117,6 +265,16 @@ def jira_items(cfg: dict, window_min: int) -> list:
             "url": f"{base}/browse/{key}",
         })
     return items
+
+
+def jira_items(cfg: dict, window_min: int) -> list:
+    jira = cfg.get("jira", {})
+    if not jira.get("enabled"):
+        return []
+    issues = _jira_search(cfg, window_min)
+    if jira.get("event_mode", True):
+        return _jira_items_events(cfg, window_min, issues)
+    return _jira_items_legacy(cfg, window_min, issues)
 
 
 # ---------------------------------------------------------------------------

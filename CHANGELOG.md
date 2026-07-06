@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+### Added
+- Jira notifications are now event-level to match Jira's notification feed: instead of one notification per updated issue, each in-window status/assignee change and each comment is notified individually. Controlled by `jira.event_mode` (default on) and `jira.event_fields` (default `["status", "assignee"]`; comments are always included). Set `jira.event_mode` to `false` for the previous issue-level behaviour
+
+### Fixed
+- Jira timestamps with a timezone offset lacking a colon (e.g. `-0400`) are now parsed correctly; previously they raised `ValueError` on Python < 3.11 and could silently drop comment/changelog events
+- the `seen` de-duplication TTL now scales with `poll.max_window_minutes` (window + 3-day margin) so an event still inside the lookback window is never re-notified after its de-dup record would have expired
+
 ## [v1.5.2] - 2026-07-03
 
 ### Changed
