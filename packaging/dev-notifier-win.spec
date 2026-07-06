@@ -38,8 +38,11 @@ else:
 # some public chains -> CERTIFICATE_VERIFY_FAILED).
 datas += collect_data_files("certifi")
 
-# winotify ships a small package (toast templates); make sure it is bundled.
+# Bundle the Windows GUI stack: winotify (toasts), pystray (tray icon/menu),
+# and PIL (icon images) including their submodules.
 hiddenimports = collect_submodules("winotify")
+hiddenimports += collect_submodules("pystray")
+hiddenimports += ["PIL", "PIL.Image"]
 
 a = Analysis(
     [str(PROJECT_ROOT / "launcher.py")],

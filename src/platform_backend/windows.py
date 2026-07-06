@@ -1,33 +1,32 @@
 """Windows platform backend.
 
-Implements the :class:`~platform_backend.base.TrayBackend` system-integration
-surface for Windows using the standard library plus lightweight, Windows-only
-third-party packages:
+Implements the full :class:`~platform_backend.base.TrayBackend` interface for
+Windows:
 
-- ``open_url`` uses ``os.startfile`` (the OS "open with default handler" call).
+- Tray icon + menu via ``pystray`` (with ``Pillow`` for the icon image); the
+  app's toolkit-neutral :class:`~platform_backend.base.MenuItem`s are translated
+  into ``pystray`` menu items, including submenus and checkmarks.
+- Native toast notifications via ``winotify``; a clickable "Open" action carries
+  the URL so clicking the toast opens the relevant page.
+- ``open_url`` uses ``os.startfile``.
 - Start-at-login is a value under the per-user ``Run`` registry key
   (``HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run``), managed via the
-  stdlib ``winreg`` module. This is reversible and touches only the current
-  user's hive — the Windows analogue of the macOS LaunchAgent.
-- Notifications use ``winotify``; a clickable "Open" action carries the URL so
-  clicking the toast opens the relevant page (matching the macOS click-to-open
-  behaviour).
-- ``run_on_main`` runs the callback inline. Unlike AppKit, Windows toast/tray
-  work here has no main-run-loop affinity, so worker threads can apply results
-  directly. (When the tray UI is moved behind this backend, this will be
-  revisited to marshal onto the pystray thread.)
+  stdlib ``winreg`` module — the Windows analogue of the macOS LaunchAgent.
+- Repeating timers use ``threading.Timer`` re-armed on each fire; unlike AppKit
+  there is no main-run-loop affinity, so ``run_on_main`` applies results inline.
 
-All Windows-only imports (``winreg``, ``winotify``, ``os.startfile``) are done
-lazily inside methods so this module is importable — and unit-testable via
-stubs — on macOS/Linux CI.
+All Windows-only imports (``winreg``, ``winotify``, ``pystray``, ``PIL``,
+``os.startfile``) are done lazily so this module is importable — and
+unit-testable via stubs — on macOS/Linux CI.
 
 @author SteveZou
 """
 import os
 import sys
+import threading
 from pathlib import Path
 
-from platform_backend.base import TrayBackend
+from platform_backend.base import MenuItem, TrayBackend, Timer
 
 # Matches the macOS LaunchAgent label so the two platforms stay recognizable.
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -46,15 +45,158 @@ def _launch_command() -> str:
     return f'"{sys.executable}" "{launcher}"'
 
 
+class _RepeatingTimer(Timer):
+    """A repeating timer built on ``threading.Timer``, re-armed on each fire.
+
+    ``fn`` is called with a single positional ``None`` to match the callback
+    signature the app's timer handlers expect.
+    """
+
+    def __init__(self, fn, interval_s):
+        self._fn = fn
+        self._interval = interval_s
+        self._timer = None
+        self._stopped = False
+
+    def _run(self):
+        if self._stopped:
+            return
+        try:
+            self._fn(None)
+        finally:
+            if not self._stopped:
+                self._arm()
+
+    def _arm(self):
+        self._timer = threading.Timer(self._interval, self._run)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def start(self):
+        self._stopped = False
+        self._arm()
+
+    def stop(self):
+        self._stopped = True
+        if self._timer is not None:
+            self._timer.cancel()
+
+
 class WindowsBackend(TrayBackend):
     """Backend for Windows (win32)."""
 
+    def __init__(self):
+        self._icon = None          # pystray.Icon
+        self._name = "DevNotifier"
+        self._icon_path = None
+        self._title = None
+
+    # -- lifecycle ----------------------------------------------------------
+    def setup(self, name, icon):
+        import pystray
+
+        self._name = name or "DevNotifier"
+        self._icon_path = icon
+        self._icon = pystray.Icon(self._name, icon=self._load_image(icon),
+                                  title=self._name)
+
+    def run(self):
+        self._icon.run()
+
+    def quit(self):
+        if self._icon is not None:
+            self._icon.stop()
+
     def run_on_main(self, fn):
-        # No main-run-loop affinity for the current (notification-only) surface;
-        # apply the result directly. Signature matches the macOS backend: fn is
-        # called with a single positional None.
+        # No main-run-loop affinity for pystray/winotify; apply the result
+        # directly. Signature matches the macOS backend: fn is called with None.
         fn(None)
 
+    # -- tray appearance / menu --------------------------------------------
+    @staticmethod
+    def _load_image(path):
+        """Load an icon file into a PIL image, or None if unavailable."""
+        if not path:
+            return None
+        try:
+            from PIL import Image
+
+            return Image.open(path)
+        except Exception:  # noqa: BLE001 - a missing/bad icon must not crash
+            return None
+
+    def set_icon(self, path):
+        self._icon_path = path
+        if self._icon is not None:
+            img = self._load_image(path)
+            if img is not None:
+                self._icon.icon = img
+
+    def set_title(self, title):
+        self._title = title
+        if self._icon is not None and title:
+            self._icon.title = title
+
+    def _to_pystray(self, item: MenuItem):
+        """Translate a neutral MenuItem into a pystray.MenuItem (recursively)."""
+        import pystray
+
+        if item.separator:
+            return pystray.Menu.SEPARATOR
+
+        if item.children:
+            submenu = pystray.Menu(*[self._to_pystray(c) for c in item.children])
+            return pystray.MenuItem(item.title, submenu)
+
+        cb = item.callback
+        # pystray invokes callbacks as fn(icon, item); the app's handlers take a
+        # single "sender" argument, so adapt by passing the neutral item through.
+        action = (lambda icon, _it, _cb=cb, _item=item: _cb(_item)) if cb else None
+        return pystray.MenuItem(
+            item.title, action,
+            checked=(lambda _it, _s=item.state: bool(_s)) if item.state else None,
+            enabled=cb is not None,
+        )
+
+    def set_menu(self, items):
+        import pystray
+
+        menu = pystray.Menu(*[self._to_pystray(i) for i in items])
+        if self._icon is not None:
+            self._icon.menu = menu
+
+    def add_timer(self, fn, interval_s):
+        t = _RepeatingTimer(fn, interval_s)
+        t.start()
+        return t
+
+    # -- notifications ------------------------------------------------------
+    def notify(self, title="", subtitle="", message="", data=None, sound=False,
+               icon=None):
+        """Show a Windows toast; a clickable "Open" action carries the URL.
+
+        Best-effort: never raises so a failing notification backend cannot crash
+        a worker thread (matching the macOS app's swallow-on-error behaviour).
+        """
+        try:
+            from winotify import Notification
+
+            url = (data or {}).get("url")
+            # winotify has no subtitle; fold it into the body for parity with
+            # the macOS title/subtitle/message layout.
+            body = message if not subtitle else f"{subtitle}\n{message}"
+            kwargs = {"app_id": "Dev Notifier", "title": title, "msg": body}
+            if icon:
+                kwargs["icon"] = icon
+            toast = Notification(**kwargs)
+            if url:
+                toast.add_actions(label="Open", launch=url)
+            toast.show()
+            return True
+        except Exception:  # noqa: BLE001 - a broken toast must not crash polling
+            return False
+
+    # -- system integration -------------------------------------------------
     def open_url(self, url):
         # os.startfile exists only on Windows; imported via os at call time.
         os.startfile(url)  # noqa: S606 - opening a user/action URL by design
@@ -95,29 +237,4 @@ class WindowsBackend(TrayBackend):
             # Value already absent — treat as success (idempotent disable).
             return True
         except OSError:
-            return False
-
-    # -- notifications ------------------------------------------------------
-    def notify(self, title, subtitle="", message="", url=None, sound=False,
-               icon=None):
-        """Show a Windows toast; a clickable "Open" action carries ``url``.
-
-        Best-effort: never raises so a failing notification backend cannot crash
-        a worker thread (matching the macOS app's swallow-on-error behaviour).
-        """
-        try:
-            from winotify import Notification
-
-            # winotify has no subtitle; fold it into the body for parity with
-            # the macOS title/subtitle/message layout.
-            body = message if not subtitle else f"{subtitle}\n{message}"
-            kwargs = {"app_id": "Dev Notifier", "title": title, "msg": body}
-            if icon:
-                kwargs["icon"] = icon
-            toast = Notification(**kwargs)
-            if url:
-                toast.add_actions(label="Open", launch=url)
-            toast.show()
-            return True
-        except Exception:  # noqa: BLE001 - a broken toast must not crash polling
             return False

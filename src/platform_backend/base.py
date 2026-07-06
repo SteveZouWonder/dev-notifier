@@ -9,35 +9,50 @@ editing the app logic.
 This module is toolkit-agnostic and imports nothing platform-specific, so it is
 safe to import on any OS (including Linux CI).
 
-Rollout note (see docs/windows-support-plan.md): P1 introduces this interface
-and the macOS backend for the *system-integration* pieces (open URL, login
-item, paths). The tray/menu UI is still driven by ``rumps`` directly in
-``notifier_app`` and will move behind ``set_menu``/``notify`` in P2, alongside
-the Windows backend.
-
 @author SteveZou
 """
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 
-@dataclass
 class MenuItem:
     """A toolkit-neutral menu entry.
 
     Backends translate this into their native representation (``rumps.MenuItem``
     on macOS, ``pystray.MenuItem`` on Windows). ``callback`` of ``None`` marks a
-    non-interactive (disabled) line. ``separator`` renders a divider and ignores
-    the other fields. Nested ``children`` produce a submenu.
+    non-interactive (disabled) line; a ``separator`` renders a divider and
+    ignores the other fields; nested children (added via :meth:`add`) produce a
+    submenu.
+
+    The attribute surface (``title``, ``callback``, ``state``, ``_children``,
+    ``add``, ``set_icon``) deliberately mirrors the small slice of the rumps
+    ``MenuItem`` API the app used, so menu-building code and its tests stay
+    toolkit-agnostic. Arbitrary tag attributes (e.g. ``theme_name``,
+    ``entry_id``) can be attached freely, as the app does to carry click
+    context.
     """
 
-    title: str = ""
-    callback: Optional[Callable] = None
-    checked: bool = False
-    icon: Optional[str] = None
-    separator: bool = False
-    children: List["MenuItem"] = field(default_factory=list)
+    def __init__(self, title="", callback=None, separator=False, icon=None):
+        self.title = title
+        self.callback = callback
+        self.separator = separator
+        self.icon = icon
+        # ``state`` mirrors rumps' checkmark flag (0/1). Kept as an int so the
+        # existing ``item.state = 1`` / ``state == 1`` idioms work unchanged.
+        self.state = 0
+        self._children: List["MenuItem"] = []
+
+    @property
+    def children(self):
+        return self._children
+
+    def add(self, item: "MenuItem") -> None:
+        """Append a child item (produces a submenu)."""
+        self._children.append(item)
+
+    def set_icon(self, path, dimensions=None, template=False):
+        """Attach an icon path (backends decide how/whether to render it)."""
+        self.icon = path
 
     @classmethod
     def sep(cls) -> "MenuItem":
@@ -54,6 +69,18 @@ class TrayBackend(ABC):
 
     # -- lifecycle ----------------------------------------------------------
     @abstractmethod
+    def setup(self, name: str, icon: Optional[str]) -> None:
+        """Create the underlying tray/app with an initial name and icon."""
+
+    @abstractmethod
+    def run(self) -> None:
+        """Start the platform event loop (blocking)."""
+
+    @abstractmethod
+    def quit(self) -> None:
+        """Terminate the app / stop the event loop."""
+
+    @abstractmethod
     def run_on_main(self, fn: Callable) -> None:
         """Schedule ``fn`` to run on the UI/main thread.
 
@@ -61,6 +88,29 @@ class TrayBackend(ABC):
         single positional argument (``None``) to match the existing app
         callbacks.
         """
+
+    # -- tray appearance / menu --------------------------------------------
+    @abstractmethod
+    def set_icon(self, path: Optional[str]) -> None:
+        """Set the tray icon to the image at ``path`` (or clear it)."""
+
+    @abstractmethod
+    def set_title(self, title: Optional[str]) -> None:
+        """Set the tray title/tooltip text (fallback when no icon)."""
+
+    @abstractmethod
+    def set_menu(self, items: List[MenuItem]) -> None:
+        """Replace the tray menu with ``items`` (neutral MenuItems)."""
+
+    @abstractmethod
+    def add_timer(self, fn: Callable, interval_s: float) -> "Timer":
+        """Create and start a repeating timer calling ``fn`` every interval."""
+
+    # -- notifications ------------------------------------------------------
+    @abstractmethod
+    def notify(self, title="", subtitle="", message="", data=None, sound=False,
+               icon=None) -> None:
+        """Show a native notification. ``data`` may carry a ``url`` to open."""
 
     # -- system integration -------------------------------------------------
     @abstractmethod
@@ -78,3 +128,16 @@ class TrayBackend(ABC):
     @abstractmethod
     def disable_login_item(self) -> bool:
         """Unregister the app from starting at login. Returns success."""
+
+
+class Timer:
+    """Minimal repeating-timer handle returned by :meth:`TrayBackend.add_timer`.
+
+    Backends subclass or duck-type this; the app only calls ``start``/``stop``.
+    """
+
+    def start(self):  # pragma: no cover - overridden by concrete backends
+        raise NotImplementedError
+
+    def stop(self):  # pragma: no cover - overridden by concrete backends
+        raise NotImplementedError

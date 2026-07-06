@@ -180,6 +180,101 @@ def fake_rumps():
         sys.modules.pop("notifier_app", None)
 
 
+class FakeTimer:
+    """Records start/stop; never actually fires (tests drive callbacks)."""
+
+    def __init__(self, fn, interval):
+        self.fn = fn
+        self.interval = interval
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
+class FakeBackend:
+    """A recording TrayBackend for exercising NotifierApp logic headlessly.
+
+    Captures notifications, opened URLs, the rendered menu, icon/title, created
+    timers, and an in-memory login-item flag — so app-logic tests assert on the
+    backend surface without any real GUI toolkit.
+    """
+
+    def __init__(self):
+        self.notifications = []
+        self.opened_urls = []
+        self.menu = []
+        self.icon = None
+        self.title = None
+        self.name = None
+        self.timers = []
+        self.ran = False
+        self.quit_called = False
+        self._login_enabled = False
+
+    # lifecycle
+    def setup(self, name, icon):
+        self.name = name
+        self.icon = icon
+
+    def run(self):
+        self.ran = True
+
+    def quit(self):
+        self.quit_called = True
+
+    def run_on_main(self, fn):
+        fn(None)
+
+    # tray appearance / menu
+    def set_icon(self, path):
+        self.icon = path
+
+    def set_title(self, title):
+        self.title = title
+
+    def set_menu(self, items):
+        self.menu = items
+
+    def add_timer(self, fn, interval_s):
+        t = FakeTimer(fn, interval_s)
+        t.start()
+        self.timers.append(t)
+        return t
+
+    # notifications
+    def notify(self, title="", subtitle="", message="", data=None, sound=False,
+               icon=None):
+        self.notifications.append(
+            {"title": title, "subtitle": subtitle, "message": message,
+             "data": data or {}, "sound": sound, "icon": icon})
+
+    # system integration
+    def open_url(self, url):
+        self.opened_urls.append(url)
+
+    def login_item_enabled(self):
+        return self._login_enabled
+
+    def enable_login_item(self):
+        self._login_enabled = True
+        return True
+
+    def disable_login_item(self):
+        self._login_enabled = False
+        return True
+
+
+@pytest.fixture
+def fake_backend():
+    """A fresh recording backend instance."""
+    return FakeBackend()
+
+
 @pytest.fixture
 def fake_winreg():
     """In-memory stub of the stdlib ``winreg`` module (Windows-only).
@@ -246,6 +341,87 @@ def fake_winreg():
             sys.modules["winreg"] = saved
         else:
             sys.modules.pop("winreg", None)
+
+
+@pytest.fixture
+def fake_pystray():
+    """Stub of the ``pystray`` package for testing the Windows tray UI.
+
+    Provides Icon/Menu/MenuItem shims that record structure and callbacks so the
+    neutral-MenuItem -> pystray translation and icon/menu wiring can be asserted
+    off-Windows.
+    """
+    stub = types.ModuleType("pystray")
+
+    class _Menu:
+        SEPARATOR = object()
+
+        def __init__(self, *items):
+            self.items = list(items)
+
+    class _MenuItem:
+        def __init__(self, title, action=None, checked=None, enabled=True):
+            self.title = title
+            self.action = action
+            self.checked = checked
+            self.enabled = enabled
+
+    class _Icon:
+        def __init__(self, name, icon=None, title=None, menu=None):
+            self.name = name
+            self.icon = icon
+            self.title = title
+            self.menu = menu
+            self.ran = False
+            self.stopped = False
+
+        def run(self):
+            self.ran = True
+
+        def stop(self):
+            self.stopped = True
+
+    stub.Menu = _Menu
+    stub.MenuItem = _MenuItem
+    stub.Icon = _Icon
+
+    saved = sys.modules.get("pystray")
+    sys.modules["pystray"] = stub
+    try:
+        yield stub
+    finally:
+        if saved is not None:
+            sys.modules["pystray"] = saved
+        else:
+            sys.modules.pop("pystray", None)
+
+
+@pytest.fixture
+def fake_pil():
+    """Stub of ``PIL.Image`` so icon loading is testable without Pillow."""
+    pil = types.ModuleType("PIL")
+    image_mod = types.ModuleType("PIL.Image")
+
+    class _Img:
+        def __init__(self, path):
+            self.path = path
+
+    image_mod.Image = _Img
+    image_mod.open = lambda path: _Img(path)
+    pil.Image = image_mod
+
+    saved_pil = sys.modules.get("PIL")
+    saved_img = sys.modules.get("PIL.Image")
+    sys.modules["PIL"] = pil
+    sys.modules["PIL.Image"] = image_mod
+    try:
+        yield image_mod
+    finally:
+        for name, saved in (("PIL", saved_pil), ("PIL.Image", saved_img)):
+            if saved is not None:
+                sys.modules[name] = saved
+            else:
+                sys.modules.pop(name, None)
 
 
 @pytest.fixture

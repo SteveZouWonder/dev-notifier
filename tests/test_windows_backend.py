@@ -142,7 +142,7 @@ def test_login_item_enabled_false_on_oserror(backend, fake_winreg, monkeypatch):
 
 def test_notify_builds_toast_with_open_action(backend, fake_winotify):
     ok = backend.notify(title="Jira", subtitle="ACME-1", message="updated",
-                        url="https://x", sound=True)
+                        data={"url": "https://x"}, sound=True)
     assert ok is True
     toast = fake_winotify._shown[-1]
     assert toast.title == "Jira"
@@ -176,3 +176,153 @@ def test_notify_swallows_errors(backend, fake_winotify, monkeypatch):
     monkeypatch.setattr(fake_winotify, "Notification", boom)
     # A broken toast must never raise (would crash the polling worker).
     assert backend.notify(title="t", message="m") is False
+
+
+# ---------------------------------------------------------------------------
+# tray UI: setup / icon / title / menu (pystray + PIL)
+# ---------------------------------------------------------------------------
+
+def test_setup_creates_icon(backend, fake_pystray, fake_pil):
+    backend.setup(name="DevNotifier", icon="/tmp/orange.png")
+    assert backend._icon is not None
+    assert backend._icon.name == "DevNotifier"
+    # The PIL image was loaded from the icon path.
+    assert backend._icon.icon.path == "/tmp/orange.png"
+
+
+def test_setup_without_icon(backend, fake_pystray):
+    backend.setup(name="DevNotifier", icon=None)
+    assert backend._icon.icon is None
+
+
+def test_load_image_bad_path_returns_none(win_mod, monkeypatch):
+    # PIL.Image.open raising must not propagate.
+    import types as _types
+    pil_img = _types.ModuleType("PIL.Image")
+
+    def boom(path):
+        raise OSError("bad image")
+
+    pil_img.open = boom
+    pil = _types.ModuleType("PIL")
+    pil.Image = pil_img
+    import sys
+    monkeypatch.setitem(sys.modules, "PIL", pil)
+    monkeypatch.setitem(sys.modules, "PIL.Image", pil_img)
+    assert win_mod.WindowsBackend._load_image("/tmp/x.png") is None
+
+
+def test_run_and_quit(backend, fake_pystray, fake_pil):
+    backend.setup(name="D", icon=None)
+    backend.run()
+    assert backend._icon.ran is True
+    backend.quit()
+    assert backend._icon.stopped is True
+
+
+def test_quit_before_setup_is_safe(backend):
+    # No icon yet -> quit is a no-op, not a crash.
+    backend.quit()
+
+
+def test_set_icon_updates_running_icon(backend, fake_pystray, fake_pil):
+    backend.setup(name="D", icon="/tmp/a.png")
+    backend.set_icon("/tmp/b.png")
+    assert backend._icon.icon.path == "/tmp/b.png"
+
+
+def test_set_title_updates_running_icon(backend, fake_pystray, fake_pil):
+    backend.setup(name="D", icon=None)
+    backend.set_title("busy")
+    assert backend._icon.title == "busy"
+
+
+def test_set_menu_translates_items(backend, fake_pystray, fake_pil):
+    from platform_backend.base import MenuItem
+    backend.setup(name="D", icon=None)
+
+    clicked = {}
+    parent = MenuItem("Parent")
+    child = MenuItem("Child", callback=lambda sender: clicked.setdefault("hit", sender))
+    parent.add(child)
+    checked = MenuItem("On", callback=lambda s: None)
+    checked.state = 1
+    items = [MenuItem("Top", callback=lambda s: None), MenuItem.sep(), parent, checked]
+
+    backend.set_menu(items)
+    menu = backend._icon.menu
+    # 4 entries: item, separator, submenu-parent, checked item.
+    assert len(menu.items) == 4
+    assert menu.items[1] is fake_pystray.Menu.SEPARATOR
+    # The submenu parent wraps a nested Menu with the child.
+    submenu_item = menu.items[2]
+    assert submenu_item.title == "Parent"
+    # Checked item exposes a checked predicate.
+    assert menu.items[3].checked is not None
+    assert menu.items[3].checked(None) is True
+
+
+def test_menu_callback_adapts_signature(backend, fake_pystray, fake_pil):
+    from platform_backend.base import MenuItem
+    backend.setup(name="D", icon=None)
+    got = {}
+    item = MenuItem("X", callback=lambda sender: got.setdefault("sender", sender))
+    backend.set_menu([item])
+    entry = backend._icon.menu.items[0]
+    # pystray calls action(icon, item); the adapter forwards the neutral item.
+    entry.action("ICON", "PYSTRAY_ITEM")
+    assert got["sender"] is item
+
+
+def test_add_timer_returns_started_timer(backend):
+    fired = {"n": 0}
+    t = backend.add_timer(lambda _: fired.__setitem__("n", fired["n"] + 1), 999)
+    assert t is not None
+    t.stop()  # cancel so nothing fires during the test
+
+
+def test_repeating_timer_fires_and_rearms(win_mod, monkeypatch):
+    # Drive _RepeatingTimer without real threads: capture the scheduled fn and
+    # invoke it manually, asserting it calls fn(None) and re-arms.
+    scheduled = []
+
+    class FakeThreadingTimer:
+        def __init__(self, interval, fn):
+            self.interval = interval
+            self.fn = fn
+            self.daemon = False
+            self.cancelled = False
+
+        def start(self):
+            scheduled.append(self)
+
+        def cancel(self):
+            self.cancelled = True
+
+    monkeypatch.setattr(win_mod.threading, "Timer", FakeThreadingTimer)
+
+    calls = []
+    t = win_mod._RepeatingTimer(lambda arg: calls.append(arg), 5)
+    t.start()
+    assert len(scheduled) == 1  # armed once
+
+    # Fire the scheduled callback -> fn(None) runs and the timer re-arms.
+    scheduled[0].fn()
+    assert calls == [None]
+    assert len(scheduled) == 2  # re-armed
+
+    # After stop(), a pending fire does nothing and does not re-arm.
+    t.stop()
+    scheduled[1].fn()
+    assert calls == [None]  # fn not called again
+    assert len(scheduled) == 2
+
+
+def test_repeating_timer_stop_before_fire(win_mod, monkeypatch):
+    monkeypatch.setattr(win_mod.threading, "Timer",
+                        lambda *a, **k: type("T", (), {
+                            "daemon": False, "start": lambda self: None,
+                            "cancel": lambda self: None})())
+    t = win_mod._RepeatingTimer(lambda _: None, 5)
+    t.start()
+    t.stop()  # cancels cleanly
