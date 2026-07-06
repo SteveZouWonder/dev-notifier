@@ -30,10 +30,7 @@ def get_backend(platform: str = None) -> TrayBackend:
 
         return MacOSBackend()
     if plat == "win32":
-        # WindowsBackend is added in P2; the import fails until then. The
-        # instantiation line is unreachable until the module exists, so it is
-        # excluded from coverage rather than asserted here.
         from platform_backend.windows import WindowsBackend
 
-        return WindowsBackend()  # pragma: no cover
+        return WindowsBackend()
     raise NotImplementedError(f"No tray backend for platform: {plat!r}")

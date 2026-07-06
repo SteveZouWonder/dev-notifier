@@ -75,13 +75,13 @@ def test_get_backend_unsupported_platform_raises():
         platform_backend.get_backend("sunos")
 
 
-def test_get_backend_win32_imports_windows_backend(monkeypatch):
-    # The Windows backend does not exist yet (P2). Dispatch should attempt the
-    # import and surface an ImportError rather than silently returning None.
+def test_get_backend_win32_returns_windows_backend():
     import platform_backend
+    from platform_backend.windows import WindowsBackend
 
-    with pytest.raises(ImportError):
-        platform_backend.get_backend("win32")
+    backend = platform_backend.get_backend("win32")
+    assert isinstance(backend, WindowsBackend)
+    assert isinstance(backend, TrayBackend)
 
 
 # ---------------------------------------------------------------------------

@@ -1,2 +1,3 @@
 rumps>=0.4.0 ; sys_platform == "darwin"
+winotify>=1.1.0 ; sys_platform == "win32"
 certifi>=2023.7.22

@@ -178,3 +178,110 @@ def fake_rumps():
             else:
                 sys.modules.pop(name, None)
         sys.modules.pop("notifier_app", None)
+
+
+@pytest.fixture
+def fake_winreg():
+    """In-memory stub of the stdlib ``winreg`` module (Windows-only).
+
+    The Windows backend uses ``winreg`` to manage the per-user Run key. On
+    macOS/Linux CI that module does not exist, so we inject a fake with an
+    in-memory store that supports the create/set/query/delete round-trip the
+    backend performs. Missing keys/values raise ``FileNotFoundError`` (an
+    ``OSError`` subclass), matching real winreg semantics.
+    """
+    stub = types.ModuleType("winreg")
+    stub.HKEY_CURRENT_USER = "HKCU"
+    stub.REG_SZ = 1
+    stub.KEY_SET_VALUE = 0x0002
+    # store: {(hive, subkey): {value_name: (data, type)}}
+    stub._store = {}
+
+    class _Key:
+        def __init__(self, ident):
+            self.ident = ident
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _open_key(hive, subkey, reserved=0, access=0):
+        if (hive, subkey) not in stub._store:
+            raise FileNotFoundError(2, "key not found")
+        return _Key((hive, subkey))
+
+    def _create_key(hive, subkey):
+        stub._store.setdefault((hive, subkey), {})
+        return _Key((hive, subkey))
+
+    def _set_value_ex(key, name, reserved, vtype, data):
+        stub._store.setdefault(key.ident, {})[name] = (data, vtype)
+
+    def _query_value_ex(key, name):
+        values = stub._store.get(key.ident, {})
+        if name not in values:
+            raise FileNotFoundError(2, "value not found")
+        return values[name]
+
+    def _delete_value(key, name):
+        values = stub._store.get(key.ident, {})
+        if name not in values:
+            raise FileNotFoundError(2, "value not found")
+        del values[name]
+
+    stub.OpenKey = _open_key
+    stub.CreateKey = _create_key
+    stub.SetValueEx = _set_value_ex
+    stub.QueryValueEx = _query_value_ex
+    stub.DeleteValue = _delete_value
+
+    saved = sys.modules.get("winreg")
+    sys.modules["winreg"] = stub
+    try:
+        yield stub
+    finally:
+        if saved is not None:
+            sys.modules["winreg"] = saved
+        else:
+            sys.modules.pop("winreg", None)
+
+
+@pytest.fixture
+def fake_winotify():
+    """Stub of the ``winotify`` package so toast logic is testable off-Windows.
+
+    Records constructed notifications and their actions so tests can assert on
+    title/body/URL without a real Windows Action Center.
+    """
+    stub = types.ModuleType("winotify")
+    stub._shown = []
+
+    class _Notification:
+        def __init__(self, app_id="", title="", msg="", icon=None, **k):
+            self.app_id = app_id
+            self.title = title
+            self.msg = msg
+            self.icon = icon
+            self.actions = []
+            self.shown = False
+
+        def add_actions(self, label="", launch=""):
+            self.actions.append({"label": label, "launch": launch})
+
+        def show(self):
+            self.shown = True
+            stub._shown.append(self)
+
+    stub.Notification = _Notification
+
+    saved = sys.modules.get("winotify")
+    sys.modules["winotify"] = stub
+    try:
+        yield stub
+    finally:
+        if saved is not None:
+            sys.modules["winotify"] = saved
+        else:
+            sys.modules.pop("winotify", None)
