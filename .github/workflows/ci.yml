@@ -163,6 +163,36 @@ jobs:
             --cov=src --cov=bump_changelog \
             --cov-report=term-missing --cov-fail-under=95
 
+  test-windows:
+    # Windows job: the tray/notification backend uses winotify + winreg, which
+    # only exist on Windows. rumps is macOS-only and is not installed here; the
+    # macOS-marked tests are excluded, and notifier_app's logic is covered via
+    # the fake_rumps stub. The Windows backend's real winreg/winotify paths run
+    # natively (no stub) on this runner.
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install test dependencies
+        # requirements-test.txt pulls in winotify only on Windows (platform
+        # marker) plus certifi and the pytest tooling. rumps is skipped by its
+        # own sys_platform == "darwin" marker.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt
+
+      - name: Run tests with pytest (exclude macOS-only)
+        run: |
+          pytest tests/ -m "not macos" -v --cov=src --cov=bump_changelog --cov-report=term-missing --cov-fail-under=95
+
   security-scan:
     runs-on: ubuntu-latest
 

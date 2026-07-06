@@ -78,8 +78,39 @@ jobs:
           name: DevNotifier-macos
           path: dist/*.dmg
 
+  build-windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-build.txt
+
+      - name: Build with PyInstaller
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+        run: pyinstaller packaging/dev-notifier-win.spec --noconfirm
+
+      - name: Package (rename to versioned asset)
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+        run: pwsh packaging/windows_package.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DevNotifier-windows
+          path: dist/*.exe
+
   release:
-    needs: [prepare, build-macos]
+    needs: [prepare, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout (for CHANGELOG + scripts)
@@ -91,9 +122,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: actions/download-artifact@v4
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
         with:
           name: DevNotifier-macos
+          path: artifacts
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: DevNotifier-windows
           path: artifacts
 
       - name: Generate SHA-256 checksums
@@ -101,7 +139,8 @@ jobs:
           mkdir -p artifacts/checksums
           (
             cd artifacts
-            find . -type f -name '*.dmg' -exec shasum -a 256 {} \; > checksums/SHA256SUMS.txt
+            find . -type f \( -name '*.dmg' -o -name '*.exe' \) \
+              -exec shasum -a 256 {} \; > checksums/SHA256SUMS.txt
           )
           echo "==> SHA256SUMS.txt"
           cat artifacts/checksums/SHA256SUMS.txt
@@ -153,6 +192,7 @@ jobs:
           body_path: release_notes.md
           files: |
             artifacts/*.dmg
+            artifacts/*.exe
             artifacts/checksums/SHA256SUMS.txt
 
   # ---------------------------------------------------------------------------
