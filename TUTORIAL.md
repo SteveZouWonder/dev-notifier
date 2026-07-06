@@ -1,14 +1,17 @@
 # Dev Notifier — Tutorial
 
 A step-by-step guide to installing, configuring, and running Dev Notifier: a
-macOS menu-bar app that watches Jira, GitHub & PagerDuty and shows clickable
-desktop notifications.
+**macOS & Windows** tray app that watches Jira, GitHub & PagerDuty and shows
+clickable desktop notifications.
+
+On macOS it lives in the **menu bar**; on Windows it lives in the **system
+tray** (bottom-right, near the clock). The behaviour is the same on both.
 
 ---
 
 ## 1. Install
 
-### Option A — download the DMG (recommended)
+### macOS — Option A: download the DMG (recommended)
 
 1. Go to [Releases](../../releases) and download the latest
    `DevNotifier-<version>.dmg`.
@@ -28,14 +31,38 @@ desktop notifications.
 
 After launch, a lightning-bolt icon appears in your menu bar.
 
-### Option B — run from source
+### Windows — Option A: download the EXE (recommended)
 
-Requires Python 3.12+.
+1. Go to [Releases](../../releases) and download the latest
+   `DevNotifier-<version>.exe`.
+2. Double-click to run it. This is an unsigned, open-source build, so Windows
+   SmartScreen may warn *"Windows protected your PC"*. Click **More info** →
+   **Run anyway**.
+3. The app appears as a lightning-bolt icon in the **system tray**
+   (click the ▲ "show hidden icons" arrow if it's collapsed). **Right-click**
+   the icon for the menu.
+4. Allow notifications if Windows prompts; toasts appear in the Action Center.
 
+### Option B — run from source (macOS or Windows)
+
+Requires Python 3.12+. Platform dependencies are selected automatically by
+`requirements.txt` markers (rumps on macOS; pystray + Pillow + winotify on
+Windows).
+
+**macOS:**
 ```bash
 git clone https://github.com/SteveZouWonder/dev-notifier.git
 cd dev-notifier
 python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python launcher.py
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/SteveZouWonder/dev-notifier.git
+cd dev-notifier
+python -m venv venv; .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 python launcher.py
 ```
@@ -50,9 +77,10 @@ startup (menu → **Status:** line, and **Check dependencies**).
 ### GitHub — via the `gh` CLI (no token needed)
 
 1. Install the GitHub CLI:
-   ```bash
-   brew install gh
-   ```
+   - **macOS:** `brew install gh`
+   - **Windows:** `winget install --id GitHub.cli` (or download from
+     <https://cli.github.com>). Open a **new** terminal afterward so `gh` is on
+     your `PATH`.
 2. Log in once:
    ```bash
    gh auth login
@@ -95,10 +123,11 @@ config.
 On first launch a config file is created at:
 
 ```
-~/.config/dev-notifier/config.json
+macOS:    ~/.config/dev-notifier/config.json
+Windows:  %APPDATA%\dev-notifier\config.json
 ```
 
-Open it from the menu: **menu-bar icon → Open config file**, and fill in:
+Open it from the menu: **tray icon → Open config file**, and fill in:
 
 ```json
 {
@@ -180,8 +209,8 @@ your browser.** You can also reopen anything later from the **Recent:** menu.
 | **Status:** | Shows Jira / GitHub / PagerDuty readiness; click to re-check |
 | **Recent:** | Last items seen; hover an entry → **Open** / **Remove** |
 | **Clear all recent** | Empties the recent list |
-| **Theme ▸** | Switch the menu-bar icon color |
-| **Start at login** | Toggle auto-start (installs/removes a LaunchAgent) |
+| **Theme ▸** | Switch the tray icon color |
+| **Start at login** | Toggle auto-start (macOS: LaunchAgent; Windows: `Run` registry entry) |
 | **Check dependencies** | Re-run the gh / Jira / PagerDuty checks and report |
 | **Open config file** | Edit your settings |
 | **Quit** | Exit the app |
@@ -191,27 +220,31 @@ your browser.** You can also reopen anything later from the **Recent:** menu.
 ## 6. Start at login
 
 Enable **menu → Start at login** to have Dev Notifier launch automatically when
-you log in. This writes a per-user LaunchAgent to:
+you log in. This adds a per-user entry:
 
-```
-~/Library/LaunchAgents/ai.stevezou.devnotifier.plist
-```
+- **macOS** — a LaunchAgent at
+  `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`.
+- **Windows** — a value named `DevNotifier` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
 
-Toggling it off unloads and removes that file. Nothing is installed
-system-wide.
+Toggling it off removes that entry. Nothing is installed system-wide.
 
 ---
 
 ## 7. Troubleshooting
 
 **No notifications appear**
-- Check **System Settings → Notifications → DevNotifier** is set to *Allow*
-  (style *Alerts* keeps them on screen).
-- Ensure Focus / Do Not Disturb is off.
+- **macOS:** check **System Settings → Notifications → DevNotifier** is set to
+  *Allow* (style *Alerts* keeps them on screen); ensure Focus / Do Not Disturb
+  is off.
+- **Windows:** check **Settings → System → Notifications** is on for
+  *Dev Notifier*, and turn off **Focus assist / Do not disturb**.
 
 **Status shows `GitHub …` (not ✓)**
-- `gh` isn't installed or logged in. Run `brew install gh` then
-  `gh auth login`, and click **Check dependencies**.
+- `gh` isn't installed or logged in. Install it (macOS: `brew install gh`;
+  Windows: `winget install --id GitHub.cli`), run `gh auth login`, then click
+  **Check dependencies**. On Windows, make sure you opened a new terminal so
+  `gh` is on the `PATH`.
 
 **Status shows `Jira …` (not ✓)**
 - Open the config file and make sure `base_url`, `username`, and `api_token`
@@ -231,23 +264,51 @@ system-wide.
   re-notify.
 
 **Clicking a notification doesn't open anything**
-- Make sure you allowed notifications on first launch. If you denied it, enable
-  it in System Settings → Notifications → DevNotifier, then quit and relaunch.
+- Make sure you allowed notifications on first launch. If you denied it, re-enable
+  it (macOS: System Settings → Notifications → DevNotifier; Windows: Settings →
+  System → Notifications → Dev Notifier), then quit and relaunch.
+- **Windows:** the toast's **Open** button opens the link; make sure a default
+  browser is set.
 
-**"App is damaged" on launch**
+**"App is damaged" on launch (macOS)**
 - Run: `xattr -dr com.apple.quarantine /Applications/DevNotifier.app`
+
+**"Windows protected your PC" on launch (Windows)**
+- SmartScreen warns on unsigned apps. Click **More info** → **Run anyway**.
 
 **See the logs**
 ```bash
+# macOS
 tail -f ~/.config/dev-notifier/notifier.log
+```
+```powershell
+# Windows (PowerShell)
+Get-Content -Wait "$env:APPDATA\dev-notifier\notifier.log"
 ```
 
 ---
 
 ## 8. Uninstall
 
+### macOS
+
 1. Quit from the menu.
 2. Turn off **Start at login** first (or delete
    `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`).
 3. Delete `/Applications/DevNotifier.app`.
-4. Optionally remove settings: `rm -rf ~/.config/dev-notifier`.
+4. Optionally remove settings and cache:
+   ```bash
+   rm -rf ~/.config/dev-notifier ~/Library/Caches/dev-notifier
+   ```
+
+### Windows
+
+1. Quit from the tray menu.
+2. Turn off **Start at login** first (or delete the `DevNotifier` value under
+   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, e.g.
+   `reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v DevNotifier /f`).
+3. Delete the `DevNotifier-<version>.exe` you downloaded.
+4. Optionally remove settings and cache:
+   ```powershell
+   Remove-Item -Recurse -Force "$env:APPDATA\dev-notifier", "$env:LOCALAPPDATA\dev-notifier"
+   ```
