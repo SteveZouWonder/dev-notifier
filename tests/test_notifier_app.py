@@ -71,17 +71,37 @@ def test_load_state_falls_back_on_corrupt(app_mod):
 
 
 def test_save_state_prunes_old_entries(app_mod):
+    # Default TTL (no cfg) = max(7d, max_window 10080min + 3d) = 10 days.
     app_mod.cfg_mod.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     now = time.time()
     state = {"seen": {
         "fresh": now,                    # kept
-        "stale": now - 8 * 86400,        # older than 7 days -> pruned
+        "stale": now - 11 * 86400,       # older than 10-day TTL -> pruned
+        "inside_ttl": now - 9 * 86400,   # within TTL -> kept
     }}
     app_mod._save_state(state)
 
     on_disk = json.loads(app_mod.cfg_mod.STATE_FILE.read_text(encoding="utf-8"))
     assert "fresh" in on_disk["seen"]
+    assert "inside_ttl" in on_disk["seen"]
     assert "stale" not in on_disk["seen"]
+
+
+def test_save_state_ttl_scales_with_max_window(app_mod):
+    # A larger max_window_minutes extends the seen-TTL so still-in-window
+    # events are not re-notified after their seen-entry would have expired.
+    app_mod.cfg_mod.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    cfg = {"poll": {"max_window_minutes": 20160}}  # 14 days -> TTL 17 days
+    state = {"seen": {
+        "keep": now - 16 * 86400,   # within 17-day TTL -> kept
+        "drop": now - 18 * 86400,   # beyond TTL -> pruned
+    }}
+    app_mod._save_state(state, cfg)
+
+    on_disk = json.loads(app_mod.cfg_mod.STATE_FILE.read_text(encoding="utf-8"))
+    assert "keep" in on_disk["seen"]
+    assert "drop" not in on_disk["seen"]
 
 
 # ---------------------------------------------------------------------------

@@ -84,8 +84,15 @@ def _load_state() -> dict:
     return {"seen": {}}
 
 
-def _save_state(state: dict) -> None:
-    cutoff = time.time() - 7 * 86400
+def _save_state(state: dict, cfg: dict = None) -> None:
+    # The seen-TTL must outlive the maximum lookback window; otherwise an event
+    # still inside the window whose seen-entry expired would be re-notified.
+    # Event-level fingerprints are stable (unlike the old issue+updated ones),
+    # so this edge case is real. Keep at least 7 days, plus a 3-day margin over
+    # the configured max window.
+    max_window_min = (cfg or {}).get("poll", {}).get("max_window_minutes", 10080)
+    ttl = max(7 * 86400, max_window_min * 60 + 3 * 86400)
+    cutoff = time.time() - ttl
     state["seen"] = {k: v for k, v in state.get("seen", {}).items() if v >= cutoff}
     try:
         cfg_mod.STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -666,7 +673,7 @@ class NotifierApp(rumps.App):
             # Advance the poll cursor only after a successful fetch so the next
             # window starts where this one began (no gap, no missed updates).
             self.state["last_poll"] = poll_started
-            _save_state(self.state)
+            _save_state(self.state, cfg)
             if manual and self._checking:
                 self._exit_checking()  # restores icon + rebuilds menu
             else:

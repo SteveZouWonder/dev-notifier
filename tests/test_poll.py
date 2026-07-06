@@ -32,6 +32,7 @@ def test_jira_items_disabled_returns_empty(poll_mod):
 
 
 def test_jira_items_builds_item(poll_mod, monkeypatch, sample_cfg):
+    sample_cfg["jira"]["event_mode"] = False
     issues = [{
         "key": "ACME-1",
         "fields": {
@@ -55,6 +56,7 @@ def test_jira_items_builds_item(poll_mod, monkeypatch, sample_cfg):
 
 def test_jira_items_detects_comment_mention(poll_mod, monkeypatch, sample_cfg):
     # username is dev@acme.com -> handle "dev" must be matched in a recent comment.
+    sample_cfg["jira"]["event_mode"] = False
     issues = [{
         "key": "ACME-2",
         "fields": {
@@ -74,6 +76,7 @@ def test_jira_items_detects_comment_mention(poll_mod, monkeypatch, sample_cfg):
 
 def test_jira_items_skips_unparseable_comment_date(poll_mod, monkeypatch, sample_cfg):
     # A comment with an invalid `created` timestamp is skipped (ValueError path).
+    sample_cfg["jira"]["event_mode"] = False
     issues = [{
         "key": "ACME-4",
         "fields": {
@@ -93,6 +96,7 @@ def test_jira_items_skips_unparseable_comment_date(poll_mod, monkeypatch, sample
 
 def test_jira_items_mention_with_username_without_at(poll_mod, monkeypatch, sample_cfg):
     # username without '@' -> the whole lowercased username is the handle.
+    sample_cfg["jira"]["event_mode"] = False
     sample_cfg["jira"]["username"] = "octodev"
     issues = [{
         "key": "ACME-5",
@@ -111,6 +115,7 @@ def test_jira_items_mention_with_username_without_at(poll_mod, monkeypatch, samp
 
 
 def test_jira_items_ignores_old_comment(poll_mod, monkeypatch, sample_cfg):
+    sample_cfg["jira"]["event_mode"] = False
     issues = [{
         "key": "ACME-3",
         "fields": {
@@ -126,6 +131,283 @@ def test_jira_items_ignores_old_comment(poll_mod, monkeypatch, sample_cfg):
 
     items = poll_mod.jira_items(sample_cfg, 10)
     assert items[0]["message"] == "[updated] Old"  # old comment not counted
+
+
+# ---------------------------------------------------------------------------
+# Jira — timestamp parsing (_parse_jira_dt)
+# ---------------------------------------------------------------------------
+
+def test_parse_jira_dt_offset_without_colon(poll_mod):
+    dt = poll_mod._parse_jira_dt("2026-07-05T20:57:15.858-0400")
+    assert dt is not None and dt.tzinfo is not None
+    # -04:00 -> UTC is +4h -> 00:57 the next day.
+    assert dt.year == 2026 and dt.month == 7 and dt.day == 6
+    assert dt.hour == 0 and dt.minute == 57
+
+
+def test_parse_jira_dt_offset_with_colon(poll_mod):
+    dt = poll_mod._parse_jira_dt("2026-07-05T20:57:15.858-04:00")
+    assert dt.hour == 0 and dt.day == 6
+
+
+def test_parse_jira_dt_z_suffix(poll_mod):
+    dt = poll_mod._parse_jira_dt("2026-07-05T20:57:15.858Z")
+    assert dt.hour == 20 and dt.day == 5
+
+
+def test_parse_jira_dt_naive_treated_as_utc(poll_mod):
+    dt = poll_mod._parse_jira_dt("2026-07-05T20:57:15")
+    assert dt.tzinfo is not None and dt.hour == 20
+
+
+def test_parse_jira_dt_empty_and_garbage_return_none(poll_mod):
+    assert poll_mod._parse_jira_dt("") is None
+    assert poll_mod._parse_jira_dt(None) is None
+    assert poll_mod._parse_jira_dt("not-a-date") is None
+
+
+# ---------------------------------------------------------------------------
+# Jira — event mode (changelog + comments)
+# ---------------------------------------------------------------------------
+
+def _issue_with_changelog(histories, comments=None, key="BLUE-1",
+                          summary="Do the thing", status="Done", total=None):
+    return {
+        "key": key,
+        "fields": {
+            "summary": summary,
+            "status": {"name": status},
+            "updated": _recent_iso(),
+            "comment": {"comments": comments or []},
+        },
+        "changelog": {
+            "total": total if total is not None else len(histories),
+            "histories": histories,
+        },
+    }
+
+
+def test_jira_items_event_mode_status_change(poll_mod, monkeypatch, sample_cfg):
+    hist = [{
+        "id": "5713733",
+        "created": _recent_iso(),
+        "author": {"displayName": "Ann Lin"},
+        "items": [{"field": "status", "fromString": "In QA", "toString": "Done"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    assert len(items) == 1
+    it = items[0]
+    assert it["fp"] == "jira:BLUE-1:cl:5713733:status"
+    assert it["subtitle"] == "BLUE-1 · Done"
+    assert "[status]" in it["message"]
+    assert "In QA → Done" in it["message"]
+    assert "by Ann Lin" in it["message"]
+    assert it["url"] == "https://acme.atlassian.net/browse/BLUE-1"
+
+
+def test_jira_items_event_mode_whitelist_filters_noise(poll_mod, monkeypatch,
+                                                       sample_cfg):
+    # description / Attachment are not in the default whitelist -> dropped.
+    hist = [{
+        "id": "1",
+        "created": _recent_iso(),
+        "author": {"displayName": "Ann Lin"},
+        "items": [
+            {"field": "description", "fromString": None, "toString": "x"},
+            {"field": "Attachment", "fromString": None, "toString": "a.png"},
+            {"field": "assignee", "fromString": None, "toString": "Steve Zou"},
+        ],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    assert len(items) == 1
+    assert items[0]["fp"] == "jira:BLUE-1:cl:1:assignee"
+
+
+def test_jira_items_event_mode_multiple_fields_one_history(poll_mod, monkeypatch,
+                                                           sample_cfg):
+    # Both whitelisted fields in one history -> two distinct events/fps.
+    hist = [{
+        "id": "7",
+        "created": _recent_iso(),
+        "author": {"displayName": "Ann Lin"},
+        "items": [
+            {"field": "status", "fromString": "A", "toString": "B"},
+            {"field": "assignee", "fromString": None, "toString": "Steve"},
+        ],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    fps = {it["fp"] for it in items}
+    assert fps == {"jira:BLUE-1:cl:7:status", "jira:BLUE-1:cl:7:assignee"}
+
+
+def test_jira_items_event_mode_out_of_window_history_dropped(poll_mod,
+                                                             monkeypatch,
+                                                             sample_cfg):
+    hist = [{
+        "id": "9",
+        "created": _recent_iso(minutes_ago=999),
+        "author": {"displayName": "Ann Lin"},
+        "items": [{"field": "status", "fromString": "A", "toString": "B"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    assert poll_mod.jira_items(sample_cfg, 10) == []
+
+
+def test_jira_items_event_mode_unparseable_history_date_dropped(poll_mod,
+                                                                monkeypatch,
+                                                                sample_cfg):
+    hist = [{
+        "id": "9",
+        "created": "garbage",
+        "author": {"displayName": "Ann Lin"},
+        "items": [{"field": "status", "fromString": "A", "toString": "B"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    assert poll_mod.jira_items(sample_cfg, 10) == []
+
+
+def test_jira_items_event_mode_comment_event(poll_mod, monkeypatch, sample_cfg):
+    comments = [{
+        "id": "807014",
+        "created": _recent_iso(),
+        "author": {"displayName": "Ann Lin"},
+        "body": "looks good",
+    }]
+    issue = _issue_with_changelog([], comments=comments)
+    monkeypatch.setattr(poll_mod, "_jira_search", lambda cfg, w: [issue])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    assert len(items) == 1
+    assert items[0]["fp"] == "jira:BLUE-1:comment:807014"
+    assert "[comment]" in items[0]["message"]
+    assert "commented" in items[0]["message"]
+
+
+def test_jira_items_event_mode_comment_mention(poll_mod, monkeypatch, sample_cfg):
+    # username dev@acme.com -> handle "dev" appears in the comment body.
+    comments = [{
+        "id": "1",
+        "created": _recent_iso(),
+        "author": {"displayName": "Ann Lin"},
+        "body": "hey dev please look",
+    }]
+    issue = _issue_with_changelog([], comments=comments)
+    monkeypatch.setattr(poll_mod, "_jira_search", lambda cfg, w: [issue])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    assert "mentioned you" in items[0]["message"]
+
+
+def test_jira_items_event_mode_old_comment_dropped(poll_mod, monkeypatch,
+                                                   sample_cfg):
+    comments = [{
+        "id": "1",
+        "created": _recent_iso(minutes_ago=999),
+        "author": {"displayName": "Ann Lin"},
+        "body": "old",
+    }]
+    issue = _issue_with_changelog([], comments=comments)
+    monkeypatch.setattr(poll_mod, "_jira_search", lambda cfg, w: [issue])
+    assert poll_mod.jira_items(sample_cfg, 10) == []
+
+
+def test_jira_items_event_mode_sorted_oldest_first(poll_mod, monkeypatch,
+                                                   sample_cfg):
+    hist = [
+        {"id": "2", "created": _recent_iso(minutes_ago=1),
+         "author": {"displayName": "A"},
+         "items": [{"field": "status", "fromString": "A", "toString": "B"}]},
+        {"id": "1", "created": _recent_iso(minutes_ago=5),
+         "author": {"displayName": "A"},
+         "items": [{"field": "status", "fromString": "X", "toString": "Y"}]},
+    ]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    # Oldest (id=1, 5 min ago) first.
+    assert [it["fp"] for it in items] == [
+        "jira:BLUE-1:cl:1:status", "jira:BLUE-1:cl:2:status",
+    ]
+
+
+def test_jira_items_event_mode_fetches_full_changelog_when_truncated(
+        poll_mod, monkeypatch, sample_cfg):
+    # Inline changelog reports total > len(histories) -> full log is fetched.
+    issue = _issue_with_changelog([], total=5)  # 0 inline, total 5 -> truncated
+    full = [{
+        "id": "42",
+        "created": _recent_iso(),
+        "author": {"displayName": "Ann Lin"},
+        "items": [{"field": "status", "fromString": "A", "toString": "B"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search", lambda cfg, w: [issue])
+    monkeypatch.setattr(poll_mod, "_jira_changelog", lambda cfg, key: full)
+    items = poll_mod.jira_items(sample_cfg, 10)
+    assert items[0]["fp"] == "jira:BLUE-1:cl:42:status"
+
+
+def test_jira_items_event_mode_format_change_empty_sides(poll_mod, monkeypatch,
+                                                         sample_cfg):
+    hist = [{
+        "id": "1",
+        "created": _recent_iso(),
+        "author": {"displayName": "A"},
+        "items": [{"field": "status", "fromString": None, "toString": None}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    assert "∅ → ∅" in items[0]["message"]
+
+
+def test_jira_items_event_mode_no_author(poll_mod, monkeypatch, sample_cfg):
+    hist = [{
+        "id": "1",
+        "created": _recent_iso(),
+        "author": {},
+        "items": [{"field": "status", "fromString": "A", "toString": "B"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    # No author -> no " by ..." suffix.
+    assert "by" not in items[0]["message"].split("—")[0]
+
+
+def test_jira_changelog_fetches_values(poll_mod, monkeypatch, sample_cfg):
+    payload = json.dumps({"values": [{"id": "1"}]}).encode()
+
+    class Resp:
+        def read(self):
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen",
+                        lambda *a, **k: Resp())
+    assert poll_mod._jira_changelog(sample_cfg, "BLUE-1") == [{"id": "1"}]
+
+
+def test_jira_changelog_missing_creds_returns_empty(poll_mod):
+    assert poll_mod._jira_changelog({"jira": {}}, "BLUE-1") == []
+
+
+def test_jira_changelog_swallows_network_error(poll_mod, monkeypatch, sample_cfg):
+    def boom(*a, **k):
+        raise OSError("network down")
+
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
+    assert poll_mod._jira_changelog(sample_cfg, "BLUE-1") == []
 
 
 def test_jira_search_returns_issues(poll_mod, monkeypatch, sample_cfg):
