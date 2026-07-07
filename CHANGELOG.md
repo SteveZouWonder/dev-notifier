@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.5.4] - 2026-07-07
+
 ### Changed
 - internal groundwork toward cross-platform support: introduced a `platform_backend` abstraction (system integration: open-URL, start-at-login, main-thread dispatch) and a cross-platform `paths` module for config/cache directories. macOS behaviour and paths are unchanged; `rumps` is now an install requirement only on macOS (see `docs/windows-support-plan.md`)
 - added a Windows platform backend implementing the system-integration surface: open-URL via `os.startfile`, start-at-login via the per-user `Run` registry key, and native toast notifications (with a clickable "Open" action) via `winotify`. The Windows tray/menu UI is not wired up yet; this is the backend foundation. `winotify` is an install requirement only on Windows
