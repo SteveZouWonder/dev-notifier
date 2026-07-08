@@ -88,7 +88,15 @@ class MacOSBackend(TrayBackend):
 
         if item.separator:
             return rumps.separator
-        r = rumps.MenuItem(item.title, callback=item.callback)
+        # rumps invokes the callback with the *rumps* MenuItem as sender, but the
+        # app's handlers read tag attributes (``entry_id``, ``theme_name``) set on
+        # the *neutral* MenuItem. Wrap the callback so the neutral item is passed
+        # through as the sender, matching the Windows backend. Without this the
+        # tags are lost and menu actions (Recent -> Open, theme switch) silently
+        # no-op.
+        cb = item.callback
+        wrapped = (lambda _sender, _cb=cb, _item=item: _cb(_item)) if cb else None
+        r = rumps.MenuItem(item.title, callback=wrapped)
         r.state = item.state
         if item.icon:
             try:
