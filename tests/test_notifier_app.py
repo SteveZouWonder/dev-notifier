@@ -200,6 +200,33 @@ def test_save_state_swallows_oserror(app_mod, monkeypatch):
     app_mod._save_state({"seen": {}})  # no exception
 
 
+def test_save_state_writes_atomically(app_mod):
+    # State is written via a temp file + os.replace; the final file is valid
+    # JSON and no ``.tmp`` sidecar is left behind.
+    app_mod.cfg_mod.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    app_mod._save_state({"seen": {"a": time.time()}})
+    on_disk = json.loads(app_mod.cfg_mod.STATE_FILE.read_text(encoding="utf-8"))
+    assert "a" in on_disk["seen"]
+    tmp = app_mod.cfg_mod.STATE_FILE.with_name(
+        app_mod.cfg_mod.STATE_FILE.name + ".tmp")
+    assert not tmp.exists()
+
+
+def test_save_state_cleans_up_temp_on_replace_error(app_mod, monkeypatch):
+    # If os.replace fails after the temp file is written, the temp file is
+    # removed and no exception escapes.
+    app_mod.cfg_mod.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = app_mod.cfg_mod.STATE_FILE.with_name(
+        app_mod.cfg_mod.STATE_FILE.name + ".tmp")
+
+    def boom(src, dst):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(app_mod.os, "replace", boom)
+    app_mod._save_state({"seen": {}})  # no exception
+    assert not tmp.exists()
+
+
 # ---------------------------------------------------------------------------
 # NotifierApp instantiation + behavior
 # ---------------------------------------------------------------------------

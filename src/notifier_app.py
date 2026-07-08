@@ -98,10 +98,21 @@ def _save_state(state: dict, cfg: dict = None) -> None:
     ttl = max(7 * 86400, max_window_min * 60 + 3 * 86400)
     cutoff = time.time() - ttl
     state["seen"] = {k: v for k, v in state.get("seen", {}).items() if v >= cutoff}
+    # Write atomically: a crash/kill mid-write must not leave a truncated
+    # state.json, which would fail to parse on restart and reset ``seen`` —
+    # causing every currently-unread item to be re-notified. Write to a temp
+    # file in the same directory, then os.replace (atomic on the same volume).
+    dest = cfg_mod.STATE_FILE
+    tmp = dest.with_name(dest.name + ".tmp")
     try:
-        cfg_mod.STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        os.replace(tmp, dest)
     except OSError as e:
         _log(f"ERROR writing state: {e}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 class NotifierApp:
