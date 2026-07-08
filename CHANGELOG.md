@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.5.5] - 2026-07-08
+
 ### Fixed
 - clicking the notification's "Open" button now reliably opens the item's URL. Notifications that carry a link now include an explicit "Open" action button; previously only clicking the notification body worked, because macOS does not deliver the system default button's click (with the URL) to the app
 - GitHub notifications no longer re-notify the same thread repeatedly. The de-duplication fingerprint now keys on the notification thread id alone instead of `id` + `updated_at`; previously any new activity in a thread (comment, push, re-requested review) bumped `updated_at` and minted a fresh fingerprint, so the same item popped up again
