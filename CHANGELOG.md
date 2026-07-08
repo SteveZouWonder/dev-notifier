@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.5.7] - 2026-07-08
+
 ### Added
 - the menu's Recent list now persists across restarts/upgrades: up to the 100 most recent items are saved to `state.json` (via the atomic writer) and restored on launch, instead of resetting to empty every time the app quits. The menu still shows the newest 10, and removing a shown item now backfills the next kept item into view; the id counter is persisted too so restored entries can't collide with new ones
 
