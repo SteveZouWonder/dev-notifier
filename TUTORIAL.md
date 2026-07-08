@@ -230,7 +230,51 @@ behaviour:
 | `github.login` | `""` | Leave blank to auto‑detect via `gh api user` |
 | `pagerduty.user_id` / `team_ids` | auto | Leave blank to auto‑detect |
 | `update.enabled` | `true` | Auto‑check GitHub Releases for a newer version |
+| `update.check_interval_hours` | `24` | How often to check for a newer version (hours) |
+| `update.skipped_version` | `""` | App‑managed. Set by **Skip this version**; normally you don't edit it |
 | `theme` | `"Orange"` | `Orange \| Green \| Purple \| Rainbow \| Yellow` |
+
+### Full config.json reference
+
+The first‑run file is intentionally minimal. If you want to see **every**
+setting in one place, the file below shows all fields at their built‑in
+defaults. You never need to write it out in full — any field you omit falls back
+to these values — but it's a handy reference for advanced tuning. (JSON has no
+comments, so the meaning of each field is in the table above.)
+
+```json
+{
+  "jira": {
+    "enabled": true,
+    "base_url": "https://your-domain.atlassian.net",
+    "username": "you@example.com",
+    "api_token": "",
+    "event_mode": true,
+    "event_fields": ["status", "assignee"]
+  },
+  "github": {
+    "enabled": true,
+    "login": ""
+  },
+  "pagerduty": {
+    "enabled": false,
+    "api_token": "",
+    "user_id": "",
+    "team_ids": []
+  },
+  "poll": {
+    "interval_seconds": 300,
+    "window_minutes": 1440,
+    "max_window_minutes": 10080
+  },
+  "update": {
+    "enabled": true,
+    "check_interval_hours": 24,
+    "skipped_version": ""
+  },
+  "theme": "Orange"
+}
+```
 
 ### View the log
 
