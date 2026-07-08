@@ -352,7 +352,12 @@ def gh_notifications(cfg: dict) -> list:
         else:
             url = "https://github.com/notifications"
         items.append({
-            "fp": f"gh-notif:{n.get('id','')}:{n.get('updated_at','')}",
+            # Fingerprint on the thread id only. GitHub bumps ``updated_at`` on
+            # every new activity in a thread (comment, push, re-request), so
+            # including it would mint a fresh fingerprint each time and re-notify
+            # the same thread repeatedly. The id is stable for the life of the
+            # notification thread, so one notification per thread is emitted.
+            "fp": f"gh-notif:{n.get('id','')}",
             "title": "GitHub",
             "subtitle": f"{repo} · {REASON_LABEL.get(reason, reason)}",
             "message": subj.get("title", ""),

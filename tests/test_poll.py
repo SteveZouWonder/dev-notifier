@@ -513,6 +513,24 @@ def test_gh_notifications_filters_irrelevant_reasons(poll_mod, monkeypatch, samp
     assert items[0]["url"] == "https://github.com/acme/app/pull/7"
 
 
+def test_gh_notifications_fp_ignores_updated_at(poll_mod, monkeypatch, sample_cfg):
+    """The fingerprint depends only on the thread id, not ``updated_at``, so a
+    thread whose activity bumps ``updated_at`` is not re-notified."""
+    def _notif(updated):
+        return [{
+            "id": "42", "reason": "review_requested",
+            "subject": {"title": "Please review",
+                        "url": "https://api.github.com/repos/acme/app/pulls/7"},
+            "repository": {"full_name": "acme/app"}, "updated_at": updated,
+        }]
+
+    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: _notif("2026-01-01T00:00:00Z"))
+    fp_first = poll_mod.gh_notifications(sample_cfg)[0]["fp"]
+    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: _notif("2026-02-02T09:09:09Z"))
+    fp_second = poll_mod.gh_notifications(sample_cfg)[0]["fp"]
+    assert fp_first == fp_second == "gh-notif:42"
+
+
 def test_gh_json_parses_stdout(poll_mod, monkeypatch, fake_proc):
     monkeypatch.setattr(poll_mod.subprocess, "run",
                         lambda *a, **k: fake_proc(stdout='[{"x": 1}]'))
