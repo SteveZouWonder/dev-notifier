@@ -490,6 +490,44 @@ def test_post_notification_follows_theme_switch(app, app_mod, monkeypatch):
     assert app.backend.notifications[-1]["icon"] == "/icons/Green.png"
 
 
+def test_post_notification_adds_open_button_for_url(app, app_mod, monkeypatch):
+    """A URL-carrying notification gets an explicit 'Open' action button so
+    clicking it reliably opens the link on macOS."""
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: None)
+    app._post_notification(title="t", subtitle="s", message="m",
+                           data={"url": "https://x"})
+    assert app.backend.notifications[-1]["action_button"] == "Open"
+
+
+def test_post_notification_no_open_button_without_url(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: None)
+    app._post_notification(title="t", subtitle="s", message="m", data={})
+    assert app.backend.notifications[-1]["action_button"] is None
+
+
+def test_post_notification_no_open_button_for_empty_url(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: None)
+    app._post_notification(title="t", subtitle="s", message="m",
+                           data={"url": ""})
+    assert app.backend.notifications[-1]["action_button"] is None
+
+
+def test_post_notification_explicit_action_button_preserved(app, app_mod,
+                                                            monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: None)
+    app._post_notification(title="t", subtitle="s", message="m",
+                           data={"url": "https://x"}, action_button="Go")
+    assert app.backend.notifications[-1]["action_button"] == "Go"
+
+
+def test_notify_adds_open_button(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda t: None)
+    it = {"title": "Jira", "subtitle": "ACME-1 · Open",
+          "message": "updated", "url": "https://x"}
+    app._notify(it)
+    assert app.backend.notifications[-1]["action_button"] == "Open"
+
+
 def test_toggle_login_item(app):
     # The FakeBackend tracks the login-item flag in memory.
     assert app.backend.login_item_enabled() is False

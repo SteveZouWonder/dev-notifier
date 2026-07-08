@@ -172,8 +172,12 @@ class WindowsBackend(TrayBackend):
 
     # -- notifications ------------------------------------------------------
     def notify(self, title="", subtitle="", message="", data=None, sound=False,
-               icon=None):
+               icon=None, action_button=None):
         """Show a Windows toast; a clickable "Open" action carries the URL.
+
+        ``action_button`` is accepted for cross-backend signature parity; on
+        Windows the "Open" action is derived from ``data['url']`` below, so the
+        parameter is not otherwise needed.
 
         Best-effort: never raises so a failing notification backend cannot crash
         a worker thread (matching the macOS app's swallow-on-error behaviour).

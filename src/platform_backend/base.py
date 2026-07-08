@@ -109,8 +109,14 @@ class TrayBackend(ABC):
     # -- notifications ------------------------------------------------------
     @abstractmethod
     def notify(self, title="", subtitle="", message="", data=None, sound=False,
-               icon=None) -> None:
-        """Show a native notification. ``data`` may carry a ``url`` to open."""
+               icon=None, action_button=None) -> None:
+        """Show a native notification. ``data`` may carry a ``url`` to open.
+
+        ``action_button``, when set, adds an explicit action button with that
+        title. On macOS this is required for clicking the button to reliably
+        deliver the activation (and its URL) to the app; without it the system
+        default button does not trigger the click handler.
+        """
 
     # -- system integration -------------------------------------------------
     @abstractmethod
