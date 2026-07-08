@@ -136,7 +136,8 @@ def fake_rumps():
     def _notification(title="", subtitle="", message="", data=None, **k):
         stub._notifications_sent.append(
             {"title": title, "subtitle": subtitle, "message": message,
-             "data": data or {}, "icon": k.get("icon")})
+             "data": data or {}, "icon": k.get("icon"),
+             "action_button": k.get("action_button")})
 
     stub.App = _App
     stub.MenuItem = _MenuItem
@@ -248,10 +249,11 @@ class FakeBackend:
 
     # notifications
     def notify(self, title="", subtitle="", message="", data=None, sound=False,
-               icon=None):
+               icon=None, action_button=None):
         self.notifications.append(
             {"title": title, "subtitle": subtitle, "message": message,
-             "data": data or {}, "sound": sound, "icon": icon})
+             "data": data or {}, "sound": sound, "icon": icon,
+             "action_button": action_button})
 
     # system integration
     def open_url(self, url):

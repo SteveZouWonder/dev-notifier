@@ -112,13 +112,18 @@ class MacOSBackend(TrayBackend):
 
     # -- notifications ------------------------------------------------------
     def notify(self, title="", subtitle="", message="", data=None, sound=False,
-               icon=None):
+               icon=None, action_button=None):
         import rumps
 
         kwargs = {"title": title, "subtitle": subtitle, "message": message,
                   "data": data or {}, "sound": sound}
         if icon is not None:
             kwargs["icon"] = icon
+        # An explicit action button makes clicking it deliver the activation
+        # (activationType == action_button_clicked) to the @rumps.notifications
+        # handler, so the URL opens. The system default button does not.
+        if action_button is not None:
+            kwargs["action_button"] = action_button
         rumps.notification(**kwargs)
 
     # -- system integration -------------------------------------------------

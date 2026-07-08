@@ -231,6 +231,19 @@ def test_macos_notify_without_icon(macos_backend, fake_rumps):
     assert sent["icon"] is None
 
 
+def test_macos_notify_passes_action_button(macos_backend, fake_rumps):
+    macos_backend.setup(name="D", icon=None)
+    macos_backend.notify(title="t", subtitle="s", message="m",
+                         data={"url": "u"}, action_button="Open")
+    assert fake_rumps._notifications_sent[-1]["action_button"] == "Open"
+
+
+def test_macos_notify_no_action_button_by_default(macos_backend, fake_rumps):
+    macos_backend.setup(name="D", icon=None)
+    macos_backend.notify(title="t", subtitle="s", message="m", data={})
+    assert fake_rumps._notifications_sent[-1]["action_button"] is None
+
+
 def test_macos_setup_click_handler_opens_url(macos_backend, fake_rumps, monkeypatch):
     # The @rumps.notifications-decorated handler opens the URL in the click data.
     captured = {}

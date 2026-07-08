@@ -341,12 +341,19 @@ class NotifierApp:
 
         The theme's PNG becomes the notification's identity image so
         notifications match the tray theme instead of a plain square.
+
+        When the notification carries a URL, add an explicit "Open" action
+        button. On macOS the click handler only fires for the notification body
+        or an explicit action button; the system default button alone does not
+        deliver the URL, so clicking it appears to do nothing.
         """
         if "icon" not in kwargs:
             theme = self.cfg.get("theme", DEFAULT_THEME)
             icon = _theme_icon(theme)
             if icon:
                 kwargs["icon"] = icon
+        if "action_button" not in kwargs and (kwargs.get("data") or {}).get("url"):
+            kwargs["action_button"] = "Open"
         self.backend.notify(**kwargs)
 
     def _warn_if_unmet(self):
