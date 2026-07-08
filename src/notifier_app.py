@@ -28,6 +28,13 @@ from platform_backend.base import MenuItem
 THEMES = ["Orange", "Green", "Purple", "Rainbow", "Yellow"]
 DEFAULT_THEME = "Orange"
 
+# Recent-items list: how many to keep on disk (survives restarts) vs. how many
+# to render in the menu at once. Removing a shown entry lets an older kept entry
+# take its place, so the menu always shows up to RECENT_MENU_LIMIT of the most
+# recent kept items.
+RECENT_KEEP_LIMIT = 100   # persisted to state.json
+RECENT_MENU_LIMIT = 10    # rendered in the menu
+
 
 def _assets_dir():
     """Locate the assets dir both from source and inside a PyInstaller bundle."""
@@ -98,6 +105,9 @@ def _save_state(state: dict, cfg: dict = None) -> None:
     ttl = max(7 * 86400, max_window_min * 60 + 3 * 86400)
     cutoff = time.time() - ttl
     state["seen"] = {k: v for k, v in state.get("seen", {}).items() if v >= cutoff}
+    # Persist at most the most-recent RECENT_KEEP_LIMIT entries (min(limit, len)).
+    if "recent" in state:
+        state["recent"] = list(state["recent"])[:RECENT_KEEP_LIMIT]
     # Write atomically: a crash/kill mid-write must not leave a truncated
     # state.json, which would fail to parse on restart and reset ``seen`` —
     # causing every currently-unread item to be re-notified. Write to a temp
@@ -136,8 +146,15 @@ class NotifierApp:
             self.title = "\U0001f514"
             self.backend.set_title(self.title)
         self.state = _load_state()
-        self.recent = []  # list of {id, label, url} entries for the menu
-        self._recent_counter = 0
+        # Recent list persists in state.json so it survives restarts/upgrades.
+        # Trim to the keep-limit on load in case an older/larger file exists.
+        self.recent = list(self.state.get("recent", []))[:RECENT_KEEP_LIMIT]
+        # Resume the id counter past the largest restored id so new entries never
+        # collide with restored ones (which would break Remove/Open by id).
+        self._recent_counter = self.state.get(
+            "recent_counter",
+            max((e.get("id", 0) for e in self.recent), default=0),
+        )
         self._polling = False  # guard against overlapping polls (slow network)
         self._checking = False  # True while a manual check is in flight (UI hint)
         self._base_title = None  # tray title without the "checking" indicator
@@ -395,7 +412,7 @@ class NotifierApp:
         items.append(MenuItem.sep())
         if self.recent:
             items.append(MenuItem("Recent:", callback=None))
-            for entry in self.recent[:10]:
+            for entry in self.recent[:RECENT_MENU_LIMIT]:
                 items.append(self._recent_submenu(entry))
             items.append(MenuItem.sep())
             items.append(MenuItem("Clear all recent", callback=self._clear_recent))
@@ -554,6 +571,17 @@ class NotifierApp:
         parent.add(remove_item)
         return parent
 
+    def _persist_recent(self):
+        """Mirror the recent list + id counter into state and write it to disk.
+
+        Called after every mutation (poll, remove, clear) so the menu's Recent
+        list survives restarts/upgrades instead of resetting to empty.
+        """
+        self.recent = self.recent[:RECENT_KEEP_LIMIT]
+        self.state["recent"] = self.recent
+        self.state["recent_counter"] = self._recent_counter
+        _save_state(self.state, self.cfg)
+
     def _find_recent(self, entry_id):
         for e in self.recent:
             if e["id"] == entry_id:
@@ -568,10 +596,12 @@ class NotifierApp:
     def _remove_recent(self, sender):
         entry_id = getattr(sender, "entry_id", None)
         self.recent = [e for e in self.recent if e["id"] != entry_id]
+        self._persist_recent()
         self._build_menu()
 
     def _clear_recent(self, _):
         self.recent = []
+        self._persist_recent()
         self._build_menu()
 
     def _open_config(self, _):
@@ -692,7 +722,9 @@ class NotifierApp:
                     })
                     seen[fp] = time.time()
                     new_count += 1
-            self.recent = self.recent[:10]
+            self.recent = self.recent[:RECENT_KEEP_LIMIT]
+            self.state["recent"] = self.recent
+            self.state["recent_counter"] = self._recent_counter
             # Advance the poll cursor only after a successful fetch so the next
             # window starts where this one began (no gap, no missed updates).
             self.state["last_poll"] = poll_started
