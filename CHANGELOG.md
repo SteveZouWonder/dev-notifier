@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+### Fixed
+- menu-bar menu actions work again on macOS: clicking a Recent item's "Open"/"Remove" or switching the theme did nothing since the platform-backend refactor. rumps calls the callback with its own menu item as the sender, but the handlers read tag attributes (`entry_id`, `theme_name`) that live on the toolkit-neutral menu item; the macOS backend now passes the neutral item through as the sender (matching the Windows backend), so those tags survive
+
 ## [v1.5.5] - 2026-07-08
 
 ### Fixed

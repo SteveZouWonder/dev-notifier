@@ -193,6 +193,33 @@ def test_macos_set_menu_translates_items(macos_backend, fake_rumps):
     assert menu[1] is fake_rumps.separator
 
 
+def test_macos_menu_callback_receives_neutral_item(macos_backend, fake_rumps):
+    """rumps invokes the callback with its own MenuItem as sender, but the app
+    reads tag attributes (entry_id/theme_name) set on the neutral item. The
+    backend must pass the neutral item through so those tags survive."""
+    from platform_backend.base import MenuItem
+    macos_backend.setup(name="D", icon=None)
+
+    seen = {}
+    item = MenuItem("Open", callback=lambda sender: seen.update(
+        entry_id=getattr(sender, "entry_id", None)))
+    item.entry_id = 42  # tag attribute set on the neutral item
+
+    macos_backend.set_menu([item])
+    rumps_item = list(macos_backend._app.menu)[0]
+    # Simulate rumps firing the click: it passes the *rumps* MenuItem as sender.
+    rumps_item.callback(rumps_item)
+    assert seen["entry_id"] == 42
+
+
+def test_macos_menu_no_callback_stays_none(macos_backend, fake_rumps):
+    from platform_backend.base import MenuItem
+    macos_backend.setup(name="D", icon=None)
+    macos_backend.set_menu([MenuItem("Disabled")])  # no callback
+    rumps_item = list(macos_backend._app.menu)[0]
+    assert rumps_item.callback is None
+
+
 def test_macos_set_menu_swallows_bad_icon(macos_backend, fake_rumps, monkeypatch):
     from platform_backend.base import MenuItem
 
