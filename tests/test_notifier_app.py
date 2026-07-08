@@ -329,6 +329,85 @@ def test_open_recent_missing_entry_noop(app):
     assert app.backend.opened_urls == []
 
 
+def test_recent_persisted_on_remove(app, app_mod):
+    app.recent = [{"id": 1, "label": "x", "url": "https://a"},
+                  {"id": 2, "label": "y", "url": "https://b"}]
+    app._recent_counter = 2
+
+    class Sender:
+        entry_id = 1
+
+    app._remove_recent(Sender())
+    on_disk = json.loads(
+        app_mod.cfg_mod.STATE_FILE.read_text(encoding="utf-8"))
+    assert [e["id"] for e in on_disk["recent"]] == [2]
+    assert on_disk["recent_counter"] == 2
+
+
+def test_recent_persisted_on_clear(app, app_mod):
+    app.recent = [{"id": 1, "label": "x", "url": "https://a"}]
+    app._clear_recent(None)
+    on_disk = json.loads(
+        app_mod.cfg_mod.STATE_FILE.read_text(encoding="utf-8"))
+    assert on_disk["recent"] == []
+
+
+def test_recent_restored_on_init(app_mod, fake_backend, monkeypatch):
+    """A restart reloads the recent list from state.json instead of resetting."""
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
+    app_mod.cfg_mod.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    app_mod.cfg_mod.STATE_FILE.write_text(json.dumps({
+        "seen": {},
+        "recent": [{"id": 5, "label": "old", "url": "https://x"}],
+        "recent_counter": 5,
+    }), encoding="utf-8")
+    instance = app_mod.NotifierApp(backend=fake_backend)
+    assert [e["id"] for e in instance.recent] == [5]
+    assert instance._recent_counter == 5
+
+
+def test_recent_counter_resumes_from_max_id_without_field(app_mod, fake_backend,
+                                                          monkeypatch):
+    # Older state.json may have 'recent' but no 'recent_counter': resume past the
+    # largest restored id so new entries never collide.
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
+    app_mod.cfg_mod.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    app_mod.cfg_mod.STATE_FILE.write_text(json.dumps({
+        "seen": {},
+        "recent": [{"id": 7, "label": "a", "url": ""},
+                   {"id": 3, "label": "b", "url": ""}],
+    }), encoding="utf-8")
+    instance = app_mod.NotifierApp(backend=fake_backend)
+    assert instance._recent_counter == 7
+
+
+def test_recent_menu_shows_at_most_menu_limit(app):
+    # More than RECENT_MENU_LIMIT kept -> menu renders only the newest limit.
+    from notifier_app import RECENT_MENU_LIMIT, RECENT_KEEP_LIMIT
+    app.recent = [{"id": i, "label": f"e{i}", "url": ""}
+                  for i in range(RECENT_MENU_LIMIT + 5)]
+    app._build_menu()
+    titles = [getattr(i, "title", "") for i in app.menu]
+    assert "Recent:" in titles
+    # The rendered recent submenus are the items whose label starts with "e".
+    recent_submenus = [i for i in app.menu
+                       if getattr(i, "title", "").startswith("e")]
+    assert len(recent_submenus) == RECENT_MENU_LIMIT
+    assert RECENT_KEEP_LIMIT == 100
+
+
+def test_recent_keep_limit_enforced_on_save(app_mod):
+    from notifier_app import RECENT_KEEP_LIMIT
+    app_mod.cfg_mod.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    state = {"seen": {},
+             "recent": [{"id": i, "label": "x", "url": ""}
+                        for i in range(RECENT_KEEP_LIMIT + 20)]}
+    app_mod._save_state(state)
+    on_disk = json.loads(
+        app_mod.cfg_mod.STATE_FILE.read_text(encoding="utf-8"))
+    assert len(on_disk["recent"]) == RECENT_KEEP_LIMIT
+
+
 def test_status_menuitem_pending(app):
     app.dep_status = {"pending": True}
     item = app._status_menuitem()
