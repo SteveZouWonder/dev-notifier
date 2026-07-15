@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v1.5.8] - 2026-07-15
+
 ### Added
 - actions you trigger yourself no longer notify you: Jira changelog changes/comments you authored, PagerDuty status changes you made (e.g. you acknowledged/resolved), and GitHub threads whose latest activity was your own are now suppressed. This is on by default and controlled per source via a new `suppress_self` config key (set it to `false` under `jira`/`github`/`pagerduty` to keep being notified of your own activity). Jira matches on your `accountId` (resolved via `/rest/api/3/myself`), PagerDuty on your `user_id`, and GitHub on your login
 
