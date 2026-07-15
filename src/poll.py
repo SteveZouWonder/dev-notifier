@@ -108,6 +108,33 @@ def _jira_search(cfg: dict, window_min: int) -> list:
         return []
 
 
+def _jira_myself(cfg: dict) -> str:
+    """Return the current Jira user's ``accountId`` (empty string on failure).
+
+    Used to suppress notifications for changes/comments the user made
+    themselves. ``accountId`` is compared rather than the display name because
+    display names are not unique and are not present on every payload.
+    """
+    jira = cfg.get("jira", {})
+    base = jira.get("base_url", "").rstrip("/")
+    user = jira.get("username", "")
+    token = jira.get("api_token", "")
+    if not (base and user and token):
+        return ""
+    url = f"{base}/rest/api/3/myself"
+    b64 = base64.b64encode(f"{user}:{token}".encode()).decode()
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Basic {b64}",
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+            return json.loads(resp.read().decode()).get("accountId", "")
+    except Exception as e:  # noqa: BLE001
+        _log(f"ERROR jira_myself: {e}")
+        return ""
+
+
 def _jira_changelog(cfg: dict, key: str) -> list:
     """Fetch the full changelog for one issue (used when the inline copy in the
     search response is paginated/truncated). Returns a list of history dicts.
@@ -153,8 +180,12 @@ def _issue_histories(issue: dict, cfg: dict) -> list:
     return histories
 
 
-def _events_from_changelog(issue, cfg, window_start, whitelist):
-    """Yield event dicts for whitelisted changelog field changes in-window."""
+def _events_from_changelog(issue, cfg, window_start, whitelist, self_id=""):
+    """Yield event dicts for whitelisted changelog field changes in-window.
+
+    When ``self_id`` is set, changes authored by the current user (matched on
+    ``author.accountId``) are skipped so self-triggered edits do not notify.
+    """
     key = issue.get("key", "")
     f = issue.get("fields", {})
     summary = f.get("summary", "")
@@ -164,7 +195,10 @@ def _events_from_changelog(issue, cfg, window_start, whitelist):
         ts = _parse_jira_dt(h.get("created", ""))
         if ts is None or ts < window_start:
             continue
-        author = (h.get("author") or {}).get("displayName", "")
+        author_obj = h.get("author") or {}
+        if self_id and author_obj.get("accountId", "") == self_id:
+            continue
+        author = author_obj.get("displayName", "")
         for it in h.get("items", []):
             field = it.get("field", "")
             if field not in whitelist:
@@ -179,8 +213,12 @@ def _events_from_changelog(issue, cfg, window_start, whitelist):
     return events
 
 
-def _events_from_comments(issue, cfg, window_start):
-    """Yield one event dict per in-window comment on the issue."""
+def _events_from_comments(issue, cfg, window_start, self_id=""):
+    """Yield one event dict per in-window comment on the issue.
+
+    When ``self_id`` is set, comments authored by the current user (matched on
+    ``author.accountId``) are skipped so your own comments do not notify.
+    """
     key = issue.get("key", "")
     f = issue.get("fields", {})
     summary = f.get("summary", "")
@@ -191,6 +229,8 @@ def _events_from_comments(issue, cfg, window_start):
     for c in (f.get("comment", {}) or {}).get("comments", []):
         ts = _parse_jira_dt(c.get("created", ""))
         if ts is None or ts < window_start:
+            continue
+        if self_id and (c.get("author") or {}).get("accountId", "") == self_id:
             continue
         body = json.dumps(c.get("body", ""))
         mentioned = (handle and handle in body.lower()) or "mention" in body
@@ -225,10 +265,14 @@ def _jira_items_events(cfg: dict, window_min: int, issues: list) -> list:
     base = jira.get("base_url", "").rstrip("/")
     whitelist = set(jira.get("event_fields", ["status", "assignee"]))
     window_start = datetime.now(timezone.utc) - timedelta(minutes=window_min)
+    # Resolve the current user's accountId once so self-triggered changes/
+    # comments can be suppressed (only when suppress_self is enabled).
+    self_id = _jira_myself(cfg) if jira.get("suppress_self", True) else ""
     events = []
     for issue in issues:
-        events += _events_from_changelog(issue, cfg, window_start, whitelist)
-        events += _events_from_comments(issue, cfg, window_start)
+        events += _events_from_changelog(issue, cfg, window_start, whitelist,
+                                         self_id)
+        events += _events_from_comments(issue, cfg, window_start, self_id)
     # Oldest first for stable notification ordering.
     events.sort(key=lambda e: e["ts"])
     return [_event_to_item(ev, base) for ev in events]
@@ -333,16 +377,40 @@ def _html_url(api_url: str) -> str:
     return u.replace("/pulls/", "/pull/")
 
 
-def gh_notifications(cfg: dict) -> list:
-    if not cfg.get("github", {}).get("enabled"):
+def _gh_latest_actor(subject: dict) -> str:
+    """Return the login of whoever produced a thread's latest activity.
+
+    Reads ``subject.latest_comment_url`` (the API URL of the most recent
+    comment/review/commit) and returns its ``user.login``. Returns "" when the
+    URL is missing or the lookup fails, so callers fall back to notifying.
+    """
+    url = (subject or {}).get("latest_comment_url") or ""
+    if not url:
+        return ""
+    # gh api expects a path or full URL; pass the full URL through as-is.
+    data = _gh_json(["api", url])
+    if not isinstance(data, dict):
+        return ""
+    return (data.get("user") or {}).get("login", "")
+
+
+def gh_notifications(cfg: dict, login: str = "") -> list:
+    gh = cfg.get("github", {})
+    if not gh.get("enabled"):
         return []
     notifs = _gh_json(["api", "notifications"])
+    # Only look up the latest actor when we can compare it to a known login.
+    suppress_self = gh.get("suppress_self", True) and bool(login)
     items = []
     for n in notifs:
         reason = n.get("reason", "")
         if reason not in RELEVANT_REASONS:
             continue
         subj = n.get("subject", {}) or {}
+        # Suppress threads whose only latest activity was triggered by you
+        # (e.g. reason "author" when you just pushed/commented on your own PR).
+        if suppress_self and _gh_latest_actor(subj) == login:
+            continue
         repo = (n.get("repository", {}) or {}).get("full_name", "")
         api_url = subj.get("url") or ""
         if api_url:
@@ -513,6 +581,7 @@ def pagerduty_items(cfg: dict, window_min: int) -> list:
             items.append(_pd_item(inc, "assigned to you"))
 
     # 2) Team incidents changed within the window (captures status changes).
+    suppress_self = pd.get("suppress_self", True)
     if team_ids:
         params = [("since", since), ("limit", "50"),
                   ("sort_by", "created_at:desc")]
@@ -522,6 +591,10 @@ def pagerduty_items(cfg: dict, window_min: int) -> list:
         for inc in data.get("incidents", []):
             if inc.get("id", "") in seen_ids:
                 continue  # already reported as assigned-to-you
+            # Skip status changes you made yourself (e.g. you acked/resolved).
+            changed_by = (inc.get("last_status_change_by") or {}).get("id", "")
+            if suppress_self and user_id and changed_by == user_id:
+                continue
             items.append(_pd_item(inc, "team incident"))
 
     return items
@@ -567,7 +640,7 @@ def collect_all(cfg: dict, log=None, since_ts=None):
     login = gh_login(cfg)
     return [
         ("jira", jira_items(cfg, window_min)),
-        ("github", gh_notifications(cfg)),
+        ("github", gh_notifications(cfg, login)),
         ("ci", gh_ci_fallback(cfg, login)),
         ("pagerduty", pagerduty_items(cfg, window_min)),
     ]
