@@ -35,16 +35,19 @@ DEFAULT_CONFIG = {
         "api_token": "",
         "event_mode": True,
         "event_fields": ["status", "assignee"],
+        "suppress_self": True,
     },
     "github": {
         "enabled": True,
         "login": "",
+        "suppress_self": True,
     },
     "pagerduty": {
         "enabled": False,
         "api_token": "",
         "user_id": "",
         "team_ids": [],
+        "suppress_self": True,
     },
     "poll": {
         "interval_seconds": 300,
@@ -74,19 +77,26 @@ _TEMPLATE = {
         "api_token": "",
         "_note": "Get an API token at "
                  "https://id.atlassian.com/manage-profile/security/api-tokens. "
-                 "Set enabled to false to turn Jira off.",
+                 "Set enabled to false to turn Jira off. Add "
+                 "\"suppress_self\": false to also be notified of your own "
+                 "changes/comments (on by default = your own actions are "
+                 "hidden).",
     },
     "github": {
         "enabled": True,
         "login": "",
         "_note": "No token needed — uses the 'gh' CLI. Leave login blank to "
-                 "auto-detect. Set enabled to false if you don't use GitHub.",
+                 "auto-detect. Set enabled to false if you don't use GitHub. "
+                 "Add \"suppress_self\": false to also be notified of activity "
+                 "you triggered yourself (on by default = hidden).",
     },
     "pagerduty": {
         "enabled": False,
         "api_token": "",
         "_note": "Optional. Set enabled to true and paste a PagerDuty User API "
-                 "token to get incident notifications.",
+                 "token to get incident notifications. Add \"suppress_self\": "
+                 "false to also be notified of status changes you made "
+                 "yourself (on by default = hidden).",
     },
     "theme": "Orange",
     "_theme_options": "Orange | Green | Purple | Rainbow | Yellow "

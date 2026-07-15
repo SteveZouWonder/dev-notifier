@@ -18,6 +18,18 @@ def poll_mod():
     return poll_mod
 
 
+@pytest.fixture(autouse=True)
+def _no_jira_myself(request, poll_mod, monkeypatch):
+    """Keep tests hermetic: stub the /myself lookup (no real network).
+
+    Individual self-suppression tests override this with a concrete accountId.
+    Tests marked ``real_myself`` exercise ``_jira_myself`` directly and opt out.
+    """
+    if request.node.get_closest_marker("real_myself"):
+        return
+    monkeypatch.setattr(poll_mod, "_jira_myself", lambda cfg: "")
+
+
 def _recent_iso(minutes_ago=1):
     dt = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
     return dt.isoformat().replace("+00:00", "Z")
@@ -380,6 +392,102 @@ def test_jira_items_event_mode_no_author(poll_mod, monkeypatch, sample_cfg):
     assert "by" not in items[0]["message"].split("—")[0]
 
 
+# ---------------------------------------------------------------------------
+# Jira — self-suppression (suppress_self)
+# ---------------------------------------------------------------------------
+
+def test_jira_items_suppresses_own_changelog(poll_mod, monkeypatch, sample_cfg):
+    # A status change authored by the current user (accountId ME) is dropped.
+    hist = [{
+        "id": "1", "created": _recent_iso(),
+        "author": {"displayName": "Me", "accountId": "ME"},
+        "items": [{"field": "status", "fromString": "A", "toString": "B"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_myself", lambda cfg: "ME")
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    assert poll_mod.jira_items(sample_cfg, 10) == []
+
+
+def test_jira_items_keeps_others_changelog(poll_mod, monkeypatch, sample_cfg):
+    # Same shape but a different author -> still notified.
+    hist = [{
+        "id": "1", "created": _recent_iso(),
+        "author": {"displayName": "Ann", "accountId": "OTHER"},
+        "items": [{"field": "status", "fromString": "A", "toString": "B"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_myself", lambda cfg: "ME")
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    assert len(items) == 1
+
+
+def test_jira_items_suppresses_own_comment(poll_mod, monkeypatch, sample_cfg):
+    comments = [{
+        "id": "1", "created": _recent_iso(),
+        "author": {"displayName": "Me", "accountId": "ME"},
+        "body": "self note",
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_myself", lambda cfg: "ME")
+    issue = _issue_with_changelog([], comments=comments)
+    monkeypatch.setattr(poll_mod, "_jira_search", lambda cfg, w: [issue])
+    assert poll_mod.jira_items(sample_cfg, 10) == []
+
+
+def test_jira_items_suppress_self_disabled_keeps_own(poll_mod, monkeypatch,
+                                                     sample_cfg):
+    # With suppress_self off, _jira_myself is never called and own changes show.
+    sample_cfg["jira"]["suppress_self"] = False
+
+    def _boom(cfg):
+        raise AssertionError("_jira_myself must not be called when disabled")
+
+    monkeypatch.setattr(poll_mod, "_jira_myself", _boom)
+    hist = [{
+        "id": "1", "created": _recent_iso(),
+        "author": {"displayName": "Me", "accountId": "ME"},
+        "items": [{"field": "status", "fromString": "A", "toString": "B"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    assert len(poll_mod.jira_items(sample_cfg, 10)) == 1
+
+
+@pytest.mark.real_myself
+def test_jira_myself_returns_account_id(poll_mod, monkeypatch, sample_cfg):
+    payload = json.dumps({"accountId": "ABC123"}).encode()
+
+    class Resp:
+        def read(self):
+            return payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen",
+                        lambda *a, **k: Resp())
+    assert poll_mod._jira_myself(sample_cfg) == "ABC123"
+
+
+@pytest.mark.real_myself
+def test_jira_myself_missing_creds_returns_empty(poll_mod):
+    assert poll_mod._jira_myself({"jira": {}}) == ""
+
+
+@pytest.mark.real_myself
+def test_jira_myself_swallows_network_error(poll_mod, monkeypatch, sample_cfg):
+    def boom(*a, **k):
+        raise OSError("down")
+
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
+    assert poll_mod._jira_myself(sample_cfg) == ""
+
+
 def test_jira_changelog_fetches_values(poll_mod, monkeypatch, sample_cfg):
     payload = json.dumps({"values": [{"id": "1"}]}).encode()
 
@@ -610,6 +718,99 @@ def test_gh_notifications_falls_back_to_notifications_url(poll_mod, monkeypatch,
     assert items[0]["url"] == "https://github.com/notifications"
 
 
+# ---------------------------------------------------------------------------
+# GitHub — self-suppression (suppress_self)
+# ---------------------------------------------------------------------------
+
+def test_gh_notifications_suppresses_own_activity(poll_mod, monkeypatch,
+                                                  sample_cfg):
+    notifs = [{
+        "id": "1", "reason": "author",
+        "subject": {"title": "My PR",
+                    "url": "https://api.github.com/repos/acme/app/pulls/1",
+                    "latest_comment_url":
+                        "https://api.github.com/repos/acme/app/pulls/1"},
+        "repository": {"full_name": "acme/app"}, "updated_at": "t",
+    }]
+
+    def fake_gh(args):
+        if args[:2] == ["api", "notifications"]:
+            return notifs
+        # latest_comment_url lookup -> the actor is the current login.
+        return {"user": {"login": "octocat"}}
+
+    monkeypatch.setattr(poll_mod, "_gh_json", fake_gh)
+    assert poll_mod.gh_notifications(sample_cfg, "octocat") == []
+
+
+def test_gh_notifications_keeps_others_activity(poll_mod, monkeypatch,
+                                                sample_cfg):
+    notifs = [{
+        "id": "1", "reason": "author",
+        "subject": {"title": "My PR",
+                    "url": "https://api.github.com/repos/acme/app/pulls/1",
+                    "latest_comment_url":
+                        "https://api.github.com/repos/acme/app/pulls/1"},
+        "repository": {"full_name": "acme/app"}, "updated_at": "t",
+    }]
+
+    def fake_gh(args):
+        if args[:2] == ["api", "notifications"]:
+            return notifs
+        return {"user": {"login": "someone-else"}}
+
+    monkeypatch.setattr(poll_mod, "_gh_json", fake_gh)
+    items = poll_mod.gh_notifications(sample_cfg, "octocat")
+    assert len(items) == 1
+
+
+def test_gh_notifications_no_login_skips_actor_lookup(poll_mod, monkeypatch,
+                                                      sample_cfg):
+    # Without a known login, suppression is off and no lookup is made.
+    notifs = [{
+        "id": "1", "reason": "author",
+        "subject": {"title": "My PR",
+                    "url": "https://api.github.com/repos/acme/app/pulls/1",
+                    "latest_comment_url": "https://x"},
+        "repository": {"full_name": "acme/app"}, "updated_at": "t",
+    }]
+
+    def fake_gh(args):
+        assert args[:2] == ["api", "notifications"], "no actor lookup expected"
+        return notifs
+
+    monkeypatch.setattr(poll_mod, "_gh_json", fake_gh)
+    assert len(poll_mod.gh_notifications(sample_cfg, "")) == 1
+
+
+def test_gh_notifications_suppress_self_disabled(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    sample_cfg["github"]["suppress_self"] = False
+    notifs = [{
+        "id": "1", "reason": "author",
+        "subject": {"title": "My PR",
+                    "url": "https://api.github.com/repos/acme/app/pulls/1",
+                    "latest_comment_url": "https://x"},
+        "repository": {"full_name": "acme/app"}, "updated_at": "t",
+    }]
+
+    def fake_gh(args):
+        assert args[:2] == ["api", "notifications"], "no actor lookup expected"
+        return notifs
+
+    monkeypatch.setattr(poll_mod, "_gh_json", fake_gh)
+    assert len(poll_mod.gh_notifications(sample_cfg, "octocat")) == 1
+
+
+def test_gh_latest_actor_no_url_returns_empty(poll_mod):
+    assert poll_mod._gh_latest_actor({}) == ""
+
+
+def test_gh_latest_actor_non_dict_response(poll_mod, monkeypatch):
+    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: [])
+    assert poll_mod._gh_latest_actor({"latest_comment_url": "https://x"}) == ""
+
+
 def test_gh_login_autodetect_swallows_error(poll_mod, monkeypatch):
     def boom(*a, **k):
         raise OSError("gh missing")
@@ -669,7 +870,7 @@ def test_gh_login_autodetects(poll_mod, monkeypatch, fake_proc):
 
 def test_collect_all_returns_phases(poll_mod, monkeypatch, sample_cfg):
     monkeypatch.setattr(poll_mod, "jira_items", lambda cfg, w: ["j"])
-    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg: ["g"])
+    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: ["g"])
     monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: ["c"])
     monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
     monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: ["p"])
@@ -681,7 +882,7 @@ def test_collect_all_returns_phases(poll_mod, monkeypatch, sample_cfg):
 
 def test_collect_all_wires_custom_logger(poll_mod, monkeypatch, sample_cfg):
     monkeypatch.setattr(poll_mod, "jira_items", lambda cfg, w: [])
-    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg: [])
+    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: [])
     monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
     monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
     monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: [])
@@ -697,7 +898,7 @@ def test_collect_all_passes_dynamic_window(poll_mod, monkeypatch, sample_cfg):
     # since_ts is turned into a lookback window and handed to the sources.
     seen = {}
     monkeypatch.setattr(poll_mod, "jira_items", lambda cfg, w: seen.setdefault("jira", w) or [])
-    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg: [])
+    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: [])
     monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
     monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
     monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: seen.setdefault("pd", w) or [])
@@ -863,6 +1064,52 @@ def test_pagerduty_items_only_teams_when_no_user_id(poll_mod, monkeypatch):
     assert seen["user"] is False
     assert len(items) == 1
     assert items[0]["message"].startswith("[team incident]")
+
+
+def test_pagerduty_items_suppresses_own_status_change(poll_mod, monkeypatch,
+                                                      sample_cfg):
+    # A team incident whose last status change was made by me is dropped.
+    inc = _pd_incident(iid="PT1", num=9, status="acknowledged")
+    inc["last_status_change_by"] = {"id": "PUSER1"}  # == sample_cfg user_id
+
+    def fake_get(token, path, params=None):
+        if any(k == "user_ids[]" for k, _ in (params or [])):
+            return {"incidents": []}
+        return {"incidents": [inc]}
+
+    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
+    assert poll_mod.pagerduty_items(sample_cfg, 10) == []
+
+
+def test_pagerduty_items_keeps_others_status_change(poll_mod, monkeypatch,
+                                                    sample_cfg):
+    inc = _pd_incident(iid="PT1", num=9, status="acknowledged")
+    inc["last_status_change_by"] = {"id": "SOMEONE_ELSE"}
+
+    def fake_get(token, path, params=None):
+        if any(k == "user_ids[]" for k, _ in (params or [])):
+            return {"incidents": []}
+        return {"incidents": [inc]}
+
+    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
+    items = poll_mod.pagerduty_items(sample_cfg, 10)
+    assert len(items) == 1
+    assert items[0]["message"].startswith("[team incident]")
+
+
+def test_pagerduty_items_suppress_self_disabled_keeps_own(poll_mod, monkeypatch,
+                                                          sample_cfg):
+    sample_cfg["pagerduty"]["suppress_self"] = False
+    inc = _pd_incident(iid="PT1", num=9, status="acknowledged")
+    inc["last_status_change_by"] = {"id": "PUSER1"}
+
+    def fake_get(token, path, params=None):
+        if any(k == "user_ids[]" for k, _ in (params or [])):
+            return {"incidents": []}
+        return {"incidents": [inc]}
+
+    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
+    assert len(poll_mod.pagerduty_items(sample_cfg, 10)) == 1
 
 
 def test_pd_identity_uses_configured_values(poll_mod, sample_cfg):
