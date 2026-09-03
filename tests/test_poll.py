@@ -486,6 +486,208 @@ def test_jira_myself_swallows_network_error(poll_mod, monkeypatch, sample_cfg):
     monkeypatch.setattr(poll_mod, "_log", lambda m: None)
     monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
     assert poll_mod._jira_myself(sample_cfg) == ""
+    assert poll_mod._jira_myself_cache == {}  # failures are not cached
+
+
+def _myself_resp(payload):
+    class Resp:
+        def read(self):
+            return json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    return Resp()
+
+
+@pytest.mark.real_myself
+def test_jira_myself_is_cached_and_survives_failures(poll_mod, monkeypatch,
+                                                     sample_cfg):
+    """One ``/myself`` timeout used to switch self-suppression off for the whole
+    poll (52 such polls in one user's log). The id is now cached and, when a
+    refresh fails, the last known value is reused."""
+    calls = []
+
+    def ok(*a, **k):
+        calls.append("ok")
+        return _myself_resp({"accountId": "ABC123"})
+
+    def boom(*a, **k):
+        calls.append("boom")
+        raise OSError("timeout")
+
+    logged = []
+    monkeypatch.setattr(poll_mod, "_log", logged.append)
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", ok)
+    assert poll_mod._jira_myself(sample_cfg) == "ABC123"
+    assert poll_mod._jira_myself(sample_cfg) == "ABC123"
+    assert calls == ["ok"]  # second call served from the cache
+    # Expire the cache; the refresh fails -> stale value reused, WARN logged.
+    key, (_ts, val) = next(iter(poll_mod._jira_myself_cache.items()))
+    poll_mod._jira_myself_cache[key] = (0, val)
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
+    assert poll_mod._jira_myself(sample_cfg) == "ABC123"
+    assert calls == ["ok", "boom"]
+    assert any(m.startswith("WARN jira_myself") for m in logged)
+
+
+@pytest.mark.real_myself
+def test_jira_myself_empty_account_id_not_cached(poll_mod, monkeypatch,
+                                                sample_cfg):
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen",
+                        lambda *a, **k: _myself_resp({}))
+    assert poll_mod._jira_myself(sample_cfg) == ""
+    assert poll_mod._jira_myself_cache == {}
+
+
+# ---------------------------------------------------------------------------
+# Jira — automation suppression (suppress_automation)
+# ---------------------------------------------------------------------------
+
+_AUTOMATION = {"displayName": "Automation for Jira", "accountId": "APP1",
+               "accountType": "app"}
+
+
+def test_jira_items_suppresses_automation_changes(poll_mod, monkeypatch,
+                                                  sample_cfg):
+    # "Automation for Jira" moved the ticket (typically right after *you*
+    # opened a PR) -> dropped by default.
+    hist = [{
+        "id": "1", "created": _recent_iso(), "author": _AUTOMATION,
+        "items": [{"field": "status", "fromString": "To Do",
+                   "toString": "Code Review"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    assert poll_mod.jira_items(sample_cfg, 10) == []
+
+
+def test_jira_items_keeps_automation_assigning_to_you(poll_mod, monkeypatch,
+                                                      sample_cfg):
+    # ... unless the rule hands the issue to you: that is worth hearing about.
+    hist = [{
+        "id": "1", "created": _recent_iso(), "author": _AUTOMATION,
+        "items": [{"field": "assignee", "from": None, "to": "ME",
+                   "fromString": None, "toString": "Me"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_myself", lambda cfg: "ME")
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    items = poll_mod.jira_items(sample_cfg, 10)
+    assert len(items) == 1
+    assert "by Automation for Jira" in items[0]["message"]
+
+
+def test_jira_items_automation_assigning_someone_else_suppressed(poll_mod,
+                                                                 monkeypatch,
+                                                                 sample_cfg):
+    hist = [{
+        "id": "1", "created": _recent_iso(), "author": _AUTOMATION,
+        "items": [{"field": "assignee", "to": "OTHER", "toString": "Ann"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_myself", lambda cfg: "ME")
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    assert poll_mod.jira_items(sample_cfg, 10) == []
+
+
+def test_jira_items_suppress_automation_disabled(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    sample_cfg["jira"]["suppress_automation"] = False
+    hist = [{
+        "id": "1", "created": _recent_iso(), "author": _AUTOMATION,
+        "items": [{"field": "status", "fromString": "A", "toString": "B"}],
+    }]
+    monkeypatch.setattr(poll_mod, "_jira_search",
+                        lambda cfg, w: [_issue_with_changelog(hist)])
+    assert len(poll_mod.jira_items(sample_cfg, 10)) == 1
+
+
+def test_is_jira_app_author(poll_mod):
+    assert poll_mod._is_jira_app_author({}) is False
+    assert poll_mod._is_jira_app_author(None) is False
+    assert poll_mod._is_jira_app_author({"accountType": "atlassian",
+                                         "displayName": "Ann"}) is False
+    assert poll_mod._is_jira_app_author({"accountType": "app"}) is True
+    # Fallback when accountType is missing from the payload.
+    assert poll_mod._is_jira_app_author(
+        {"displayName": "Automation for Jira"}) is True
+
+
+def test_history_targets_self(poll_mod):
+    h = {"items": [{"field": "assignee", "to": "ME"}]}
+    assert poll_mod._history_targets_self(h, "ME") is True
+    assert poll_mod._history_targets_self(h, "") is False
+    assert poll_mod._history_targets_self(
+        {"items": [{"field": "status", "to": "ME"}]}, "ME") is False
+
+
+# ---------------------------------------------------------------------------
+# Jira — legacy (issue-level) mode honours suppress_self
+# ---------------------------------------------------------------------------
+
+def _legacy_issue(histories=(), comments=(), key="ACME-1"):
+    return {
+        "key": key,
+        "fields": {
+            "summary": "Fix the thing",
+            "status": {"name": "In Progress"},
+            "updated": _recent_iso(),
+            "comment": {"comments": list(comments)},
+        },
+        "changelog": {"histories": list(histories),
+                      "total": len(histories)},
+    }
+
+
+def _hist(account_id, minutes_ago=1):
+    return {"id": "1", "created": _recent_iso(minutes_ago),
+            "author": {"accountId": account_id, "displayName": account_id},
+            "items": [{"field": "status", "fromString": "A", "toString": "B"}]}
+
+
+def _comment(account_id, minutes_ago=1):
+    return {"id": "1", "created": _recent_iso(minutes_ago),
+            "author": {"accountId": account_id}, "body": "hi"}
+
+
+def test_jira_legacy_suppresses_issue_only_you_touched(poll_mod, monkeypatch,
+                                                       sample_cfg):
+    """Legacy mode fingerprints on ``updated``, so every edit of yours minted a
+    new notification. Issues whose only in-window activity is yours are skipped."""
+    sample_cfg["jira"]["event_mode"] = False
+    monkeypatch.setattr(poll_mod, "_jira_myself", lambda cfg: "ME")
+    issues = [_legacy_issue([_hist("ME")], [_comment("ME")])]
+    monkeypatch.setattr(poll_mod, "_jira_search", lambda cfg, w: issues)
+    assert poll_mod.jira_items(sample_cfg, 10) == []
+
+
+def test_jira_legacy_keeps_issue_others_touched(poll_mod, monkeypatch,
+                                                sample_cfg):
+    sample_cfg["jira"]["event_mode"] = False
+    monkeypatch.setattr(poll_mod, "_jira_myself", lambda cfg: "ME")
+    # Your change plus someone else's comment -> still notified.
+    issues = [_legacy_issue([_hist("ME")], [_comment("OTHER")]),
+              # Only stale (out-of-window) activity -> cannot tell, notified.
+              _legacy_issue([_hist("ME", minutes_ago=999)], key="ACME-2")]
+    monkeypatch.setattr(poll_mod, "_jira_search", lambda cfg, w: issues)
+    assert len(poll_mod.jira_items(sample_cfg, 10)) == 2
+
+
+def test_jira_legacy_suppress_self_disabled(poll_mod, monkeypatch, sample_cfg):
+    sample_cfg["jira"]["event_mode"] = False
+    sample_cfg["jira"]["suppress_self"] = False
+
+    def _boom(cfg):
+        raise AssertionError("_jira_myself must not be called when disabled")
+
+    monkeypatch.setattr(poll_mod, "_jira_myself", _boom)
+    issues = [_legacy_issue([_hist("ME")])]
+    monkeypatch.setattr(poll_mod, "_jira_search", lambda cfg, w: issues)
+    assert len(poll_mod.jira_items(sample_cfg, 10)) == 1
 
 
 def test_jira_changelog_fetches_values(poll_mod, monkeypatch, sample_cfg):
@@ -722,46 +924,249 @@ def test_gh_notifications_falls_back_to_notifications_url(poll_mod, monkeypatch,
 # GitHub — self-suppression (suppress_self)
 # ---------------------------------------------------------------------------
 
-def test_gh_notifications_suppresses_own_activity(poll_mod, monkeypatch,
-                                                  sample_cfg):
-    notifs = [{
-        "id": "1", "reason": "author",
-        "subject": {"title": "My PR",
-                    "url": "https://api.github.com/repos/acme/app/pulls/1",
-                    "latest_comment_url":
-                        "https://api.github.com/repos/acme/app/pulls/1"},
-        "repository": {"full_name": "acme/app"}, "updated_at": "t",
-    }]
+_PR_URL = "https://api.github.com/repos/acme/app/pulls/1"
+_TIMELINE_URL = "repos/acme/app/issues/1/timeline?per_page=100&page=1"
 
-    def fake_gh(args):
+
+def _own_pr_notif(latest_comment_url=_PR_URL, reason="author", nid="1",
+                  updated="t"):
+    """A notification thread for a PR the current user (octocat) authored."""
+    return {
+        "id": nid, "reason": reason,
+        "subject": {"title": "My PR", "type": "PullRequest", "url": _PR_URL,
+                    "latest_comment_url": latest_comment_url},
+        "repository": {"full_name": "acme/app"}, "updated_at": updated,
+    }
+
+
+def _gh_router(notifs, routes):
+    """Build a fake ``_gh_api``: ``notifications`` -> notifs, ``user`` -> a
+    profile without a public email (unless overridden), otherwise look up the
+    request path in ``routes`` (exact match), else ``_GH_FAIL``-free ``[]``.
+    ``routes`` values may be callables (called with no args) for side effects.
+    """
+    calls = []
+    routes = {"user": {"login": "octocat", "email": None}, **routes}
+
+    def fake(args):
+        calls.append(args)
         if args[:2] == ["api", "notifications"]:
             return notifs
-        # latest_comment_url lookup -> the actor is the current login.
-        return {"user": {"login": "octocat"}}
+        target = args[1] if args and args[0] == "api" else " ".join(args)
+        val = routes.get(target, [])
+        return val() if callable(val) else val
 
-    monkeypatch.setattr(poll_mod, "_gh_json", fake_gh)
+    fake.calls = calls
+    return fake
+
+
+def test_gh_notifications_suppresses_own_push(poll_mod, monkeypatch,
+                                              sample_cfg):
+    """You pushed to your own PR: latest_comment_url still equals the PR URL,
+    the timeline ends with a ``committed`` event, and the commit's author is
+    you -> suppressed."""
+    fake = _gh_router([_own_pr_notif()], {
+        _TIMELINE_URL: [
+            {"event": "commented", "user": {"login": "reviewer"}},
+            {"event": "committed", "sha": "abc"},
+        ],
+        "repos/acme/app/commits/abc": {"author": {"login": "octocat"}},
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
     assert poll_mod.gh_notifications(sample_cfg, "octocat") == []
+
+
+_UNLINKED_COMMIT = {"author": None, "committer": None,
+                    "commit": {"author": {"email": "Me@Typo.om"}}}
+
+
+def test_gh_notifications_unlinked_push_matched_by_configured_email(
+        poll_mod, monkeypatch, sample_cfg):
+    """GitHub cannot attribute a commit whose git email is not registered on
+    any account (e.g. a typo'd ``user.email``). ``github.emails`` names such
+    addresses as yours."""
+    sample_cfg["github"]["emails"] = ["me@typo.om"]
+    # Not an own-PR thread, so only the email list can attribute the push.
+    fake = _gh_router([_own_pr_notif(reason="review_requested")], {
+        _TIMELINE_URL: [{"event": "committed", "sha": "abc"}],
+        "repos/acme/app/commits/abc": _UNLINKED_COMMIT,
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert poll_mod.gh_notifications(sample_cfg, "octocat") == []
+
+
+def test_gh_notifications_unlinked_push_matched_by_profile_email(
+        poll_mod, monkeypatch, sample_cfg):
+    fake = _gh_router([_own_pr_notif(reason="review_requested")], {
+        "user": {"login": "octocat", "email": "ME@typo.om"},
+        _TIMELINE_URL: [{"event": "committed", "sha": "abc"}],
+        "repos/acme/app/commits/abc": _UNLINKED_COMMIT,
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert poll_mod.gh_notifications(sample_cfg, "octocat") == []
+    # The profile is fetched once per process, not per poll.
+    poll_mod.gh_notifications(sample_cfg, "octocat")
+    assert fake.calls.count(["api", "user"]) == 1
+
+
+def test_gh_notifications_unlinked_push_on_own_pr_assumed_yours(
+        poll_mod, monkeypatch, sample_cfg):
+    """Last resort: an unattributed push to a PR *you* authored is treated as
+    your own, with a one-time hint in the log."""
+    logged = []
+    monkeypatch.setattr(poll_mod, "_log", logged.append)
+    fake = _gh_router([_own_pr_notif(reason="author")], {
+        _TIMELINE_URL: [{"event": "committed", "sha": "abc"}],
+        "repos/acme/app/commits/abc": _UNLINKED_COMMIT,
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert poll_mod.gh_notifications(sample_cfg, "octocat") == []
+    hints = [m for m in logged if "not linked to a GitHub account" in m]
+    assert len(hints) == 1 and "me@typo.om" in hints[0]
+    # Same email again (new thread update) -> no second hint.
+    poll_mod._gh_actor_cache.clear()
+    poll_mod.gh_notifications(sample_cfg, "octocat")
+    assert len([m for m in logged if "not linked" in m]) == 1
+
+
+def test_gh_notifications_unlinked_push_on_others_pr_notifies(
+        poll_mod, monkeypatch, sample_cfg):
+    # Not your PR, email unknown -> cannot attribute -> notify.
+    fake = _gh_router([_own_pr_notif(reason="review_requested")], {
+        _TIMELINE_URL: [{"event": "committed", "sha": "abc"}],
+        "repos/acme/app/commits/abc": _UNLINKED_COMMIT,
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert len(poll_mod.gh_notifications(sample_cfg, "octocat")) == 1
+
+
+def test_gh_my_emails_profile_failure_is_retried(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    sample_cfg["github"]["emails"] = [" A@x.com ", "", 42]
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: poll_mod._GH_FAIL)
+    assert poll_mod._gh_my_emails(sample_cfg) == frozenset({"a@x.com"})
+    assert "auto" not in poll_mod._gh_emails_cache
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: [])  # odd payload
+    assert poll_mod._gh_my_emails(sample_cfg) == frozenset({"a@x.com"})
+    assert poll_mod._gh_emails_cache["auto"] == set()
+
+
+def test_gh_notifications_keeps_review_of_own_pr(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    """Someone reviewed your PR. GitHub leaves latest_comment_url pointing at
+    the PR itself (whose ``user`` is *you*); the old lookup therefore hid every
+    review of your own PRs. The timeline's last event names the reviewer."""
+    fake = _gh_router([_own_pr_notif()], {
+        _TIMELINE_URL: [
+            {"event": "committed", "sha": "abc"},
+            {"event": "reviewed", "user": {"login": "reviewer"}},
+        ],
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    items = poll_mod.gh_notifications(sample_cfg, "octocat")
+    assert len(items) == 1
+    # The PR object itself must not have been fetched for its ``user``.
+    assert ["api", _PR_URL] not in fake.calls
 
 
 def test_gh_notifications_keeps_others_activity(poll_mod, monkeypatch,
                                                 sample_cfg):
+    fake = _gh_router([_own_pr_notif()], {
+        _TIMELINE_URL: [{"event": "merged", "actor": {"login": "someone-else"}}],
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert len(poll_mod.gh_notifications(sample_cfg, "octocat")) == 1
+
+
+def test_gh_notifications_login_compare_is_case_insensitive(poll_mod,
+                                                            monkeypatch,
+                                                            sample_cfg):
+    fake = _gh_router([_own_pr_notif()], {
+        _TIMELINE_URL: [{"event": "commented", "user": {"login": "octocat"}}],
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert poll_mod.gh_notifications(sample_cfg, "OctoCat") == []
+
+
+def test_gh_notifications_ignores_passive_timeline_events(poll_mod, monkeypatch,
+                                                          sample_cfg):
+    """Bob's comment mentioning you produces ``commented`` (Bob) followed by
+    ``mentioned``/``subscribed`` whose actor is *you*. Those must not make the
+    thread look like your own activity."""
+    fake = _gh_router([_own_pr_notif(reason="mention")], {
+        _TIMELINE_URL: [
+            {"event": "commented", "user": {"login": "bob"}},
+            {"event": "mentioned", "actor": {"login": "octocat"}},
+            {"event": "subscribed", "actor": {"login": "octocat"}},
+        ],
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert len(poll_mod.gh_notifications(sample_cfg, "octocat")) == 1
+
+
+def test_gh_notifications_defers_thread_when_lookup_fails(poll_mod, monkeypatch,
+                                                          sample_cfg):
+    """A failed actor lookup must not fall through to notifying (that is how
+    your own pushes popped up on a flaky network). The item is skipped so it
+    is retried next poll, and the failure is not cached."""
+    logged = []
+    monkeypatch.setattr(poll_mod, "_log", logged.append)
+    fake = _gh_router([_own_pr_notif()], {_TIMELINE_URL: lambda: poll_mod._GH_FAIL})
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert poll_mod.gh_notifications(sample_cfg, "octocat") == []
+    assert any("retrying next poll" in m for m in logged)
+    assert poll_mod._gh_actor_cache == {}
+
+
+def test_gh_notifications_unknown_actor_notifies(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    # Empty timeline -> cannot tell who acted -> fail-open (notify).
+    fake = _gh_router([_own_pr_notif()], {_TIMELINE_URL: []})
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert len(poll_mod.gh_notifications(sample_cfg, "octocat")) == 1
+
+
+def test_gh_notifications_actor_lookup_is_cached_per_update(poll_mod,
+                                                            monkeypatch,
+                                                            sample_cfg):
+    fake = _gh_router([_own_pr_notif(updated="t1")], {
+        _TIMELINE_URL: [{"event": "commented", "user": {"login": "bob"}}],
+    })
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    poll_mod.gh_notifications(sample_cfg, "octocat")
+    poll_mod.gh_notifications(sample_cfg, "octocat")
+    timeline_calls = [c for c in fake.calls if c[1] == _TIMELINE_URL]
+    assert len(timeline_calls) == 1  # second poll served from the cache
+    assert poll_mod._gh_actor_cache == {"1:t1": "bob"}
+
+
+def test_gh_actor_cache_is_bounded(poll_mod, monkeypatch, sample_cfg):
+    monkeypatch.setattr(poll_mod, "_GH_ACTOR_CACHE_MAX", 2)
+    poll_mod._gh_actor_cache.update({"a:1": "x", "b:1": "y"})
+    monkeypatch.setattr(poll_mod, "_gh_latest_actor", lambda *a: "bob")
+    assert poll_mod._gh_thread_actor(_own_pr_notif(nid="c")) == "bob"
+    assert poll_mod._gh_actor_cache == {"c:t": "bob"}
+
+
+def test_gh_notifications_suppresses_ci_activity(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    """``ci_activity`` = a workflow run *you* triggered (GitHub's definition),
+    so it is dropped under suppress_self without any lookup."""
     notifs = [{
-        "id": "1", "reason": "author",
-        "subject": {"title": "My PR",
-                    "url": "https://api.github.com/repos/acme/app/pulls/1",
-                    "latest_comment_url":
-                        "https://api.github.com/repos/acme/app/pulls/1"},
+        "id": "9", "reason": "ci_activity",
+        "subject": {"title": "CI failed for main", "type": "CheckSuite",
+                    "url": None, "latest_comment_url": None},
         "repository": {"full_name": "acme/app"}, "updated_at": "t",
     }]
-
-    def fake_gh(args):
-        if args[:2] == ["api", "notifications"]:
-            return notifs
-        return {"user": {"login": "someone-else"}}
-
-    monkeypatch.setattr(poll_mod, "_gh_json", fake_gh)
-    items = poll_mod.gh_notifications(sample_cfg, "octocat")
-    assert len(items) == 1
+    fake = _gh_router(notifs, {})
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert poll_mod.gh_notifications(sample_cfg, "octocat") == []
+    # No per-thread lookup was made (only the notifications list + profile).
+    assert set(map(tuple, fake.calls)) == {("api", "notifications"),
+                                           ("api", "user")}
+    # ... but kept when suppress_self is off.
+    sample_cfg["github"]["suppress_self"] = False
+    assert len(poll_mod.gh_notifications(sample_cfg, "octocat")) == 1
 
 
 def test_gh_notifications_no_login_skips_actor_lookup(poll_mod, monkeypatch,
@@ -804,21 +1209,159 @@ def test_gh_notifications_suppress_self_disabled(poll_mod, monkeypatch,
 
 def test_gh_latest_actor_no_url_returns_empty(poll_mod):
     assert poll_mod._gh_latest_actor({}) == ""
+    assert poll_mod._gh_latest_actor(None) == ""
+
+
+def test_gh_latest_actor_non_pr_subject_uses_latest_comment(poll_mod,
+                                                            monkeypatch):
+    # A commit-comment thread: subject.url is a commit, not a PR/issue, so the
+    # latest_comment_url lookup is used; commits expose ``author``, not ``user``.
+    subj = {"url": "https://api.github.com/repos/acme/app/commits/abc",
+            "latest_comment_url": "https://api.github.com/repos/acme/app/commits/abc"}
+    monkeypatch.setattr(poll_mod, "_gh_api",
+                        lambda args: {"author": {"login": "pusher"}})
+    assert poll_mod._gh_latest_actor(subj) == "pusher"
+    monkeypatch.setattr(poll_mod, "_gh_api",
+                        lambda args: {"user": {"login": "commenter"}})
+    assert poll_mod._gh_latest_actor(subj) == "commenter"
 
 
 def test_gh_latest_actor_non_dict_response(poll_mod, monkeypatch):
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: [])
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: [])
     assert poll_mod._gh_latest_actor({"latest_comment_url": "https://x"}) == ""
+
+
+def test_gh_latest_actor_propagates_failure(poll_mod, monkeypatch):
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: poll_mod._GH_FAIL)
+    assert poll_mod._gh_latest_actor(
+        {"latest_comment_url": "https://x"}) is poll_mod._GH_FAIL
+    assert poll_mod._gh_latest_actor(
+        {"url": _PR_URL}) is poll_mod._GH_FAIL
+
+
+def test_gh_timeline_actor_walks_pages(poll_mod, monkeypatch):
+    monkeypatch.setattr(poll_mod, "_GH_TIMELINE_PAGE", 2)
+    pages = {
+        "repos/acme/app/issues/1/timeline?per_page=2&page=1": [
+            {"event": "commented", "user": {"login": "a"}},
+            {"event": "commented", "user": {"login": "b"}},
+        ],
+        "repos/acme/app/issues/1/timeline?per_page=2&page=2": [
+            {"event": "labeled", "actor": {"login": "c"}},
+        ],
+    }
+    calls = []
+
+    def fake(args):
+        calls.append(args[1])
+        return pages.get(args[1], [])
+
+    monkeypatch.setattr(poll_mod, "_gh_api", fake)
+    assert poll_mod._gh_timeline_actor("acme/app", "1") == "c"
+    assert len(calls) == 2  # stopped after the short page
+
+
+def test_gh_timeline_actor_exact_page_boundary(poll_mod, monkeypatch):
+    # Exactly one full page followed by an empty page: the full page's last
+    # event wins and paging stops at the empty response.
+    monkeypatch.setattr(poll_mod, "_GH_TIMELINE_PAGE", 1)
+    pages = {"repos/acme/app/issues/1/timeline?per_page=1&page=1":
+             [{"event": "closed", "actor": {"login": "z"}}]}
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: pages.get(args[1], []))
+    assert poll_mod._gh_timeline_actor("acme/app", "1") == "z"
+
+
+def test_gh_timeline_actor_line_comments_and_unknown(poll_mod, monkeypatch):
+    events = [
+        {"event": "line-commented",
+         "comments": [{"user": {"login": "r1"}}, {"user": {"login": "r2"}}]},
+        {"event": "weird", "actor": None},  # no login -> skipped
+        "not-a-dict",
+    ]
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: events)
+    assert poll_mod._gh_timeline_actor("acme/app", "1") == "r2"
+    # Nothing identifies an actor -> "".
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: [{"event": "x"}])
+    assert poll_mod._gh_timeline_actor("acme/app", "1") == ""
+
+
+def test_gh_timeline_actor_commit_resolution(poll_mod, monkeypatch):
+    timeline = [{"event": "committed", "sha": "abc"}]
+
+    def with_commit(commit):
+        def fake(args):
+            if "timeline" in args[1]:
+                return timeline
+            return commit
+        return fake
+
+    # Author not linked to a GitHub account -> unknown, not the previous actor.
+    monkeypatch.setattr(poll_mod, "_gh_api",
+                        with_commit({"author": None, "committer": None}))
+    assert poll_mod._gh_timeline_actor("acme/app", "1") == ""
+    # ... even on an own thread when no login is known to attribute it to.
+    assert poll_mod._gh_timeline_actor("acme/app", "1", own_thread=True) == ""
+    # Commit payload without a ``commit.author`` block -> email is "".
+    monkeypatch.setattr(poll_mod, "_gh_api",
+                        with_commit({"author": None, "commit": {}}))
+    assert poll_mod._gh_timeline_actor("acme/app", "1", me="octocat") == ""
+    # Committer used when author has no login.
+    monkeypatch.setattr(poll_mod, "_gh_api",
+                        with_commit({"author": None,
+                                     "committer": {"login": "bot"}}))
+    assert poll_mod._gh_timeline_actor("acme/app", "1") == "bot"
+    # Commit lookup failure propagates.
+    monkeypatch.setattr(poll_mod, "_gh_api", with_commit(poll_mod._GH_FAIL))
+    assert poll_mod._gh_timeline_actor("acme/app", "1") is poll_mod._GH_FAIL
+    # Non-dict commit payload -> unknown.
+    monkeypatch.setattr(poll_mod, "_gh_api", with_commit([]))
+    assert poll_mod._gh_timeline_actor("acme/app", "1") == ""
+    # A committed event without a sha cannot be resolved.
+    monkeypatch.setattr(poll_mod, "_gh_api",
+                        lambda args: [{"event": "committed"}])
+    assert poll_mod._gh_timeline_actor("acme/app", "1") == ""
+
+
+def test_gh_api_returns_fail_sentinel(poll_mod, monkeypatch):
+    import subprocess as sp
+
+    def boom(*a, **k):
+        raise sp.CalledProcessError(1, "gh", stderr="boom")
+
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
+    monkeypatch.setattr(poll_mod.subprocess, "run", boom)
+    monkeypatch.setattr(poll_mod._deps, "gh_path", lambda: "gh")
+    monkeypatch.setattr(poll_mod._deps, "augmented_env", lambda: {})
+    assert poll_mod._gh_api(["api", "x"]) is poll_mod._GH_FAIL
+    assert poll_mod._gh_json(["api", "x"]) == []
 
 
 def test_gh_login_autodetect_swallows_error(poll_mod, monkeypatch):
     def boom(*a, **k):
         raise OSError("gh missing")
 
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
     monkeypatch.setattr(poll_mod.subprocess, "run", boom)
     monkeypatch.setattr(poll_mod._deps, "gh_path", lambda: "gh")
     monkeypatch.setattr(poll_mod._deps, "augmented_env", lambda: {})
     assert poll_mod.gh_login({"github": {"login": ""}}) == ""
+    assert poll_mod._gh_login_cache == {}  # failures are not cached
+
+
+def test_gh_login_autodetect_is_cached(poll_mod, monkeypatch, fake_proc):
+    calls = []
+
+    def run(*a, **k):
+        calls.append(a)
+        return fake_proc(stdout="autodetected\n")
+
+    monkeypatch.setattr(poll_mod.subprocess, "run", run)
+    monkeypatch.setattr(poll_mod._deps, "gh_path", lambda: "gh")
+    monkeypatch.setattr(poll_mod._deps, "augmented_env", lambda: {})
+    cfg = {"github": {"login": ""}}
+    assert poll_mod.gh_login(cfg) == "autodetected"
+    assert poll_mod.gh_login(cfg) == "autodetected"
+    assert len(calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -979,6 +1522,39 @@ def test_gh_ci_fallback_collects_rollups(poll_mod, monkeypatch, sample_cfg):
     items = poll_mod.gh_ci_fallback(sample_cfg, "octocat")
     assert len(items) == 1
     assert items[0]["fp"] == "gh-ci:acme/app#1:fail"
+
+
+def _ci_prs_and_rollups(poll_mod, monkeypatch):
+    prs = [{"url": f"https://github.com/acme/app/pull/{i}", "title": r}
+           for i, r in enumerate(("fail", "pending", "pass"), start=1)]
+    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: prs)
+    monkeypatch.setattr(
+        poll_mod, "_ci_rollup_for_pr",
+        lambda pr: {"fp": f"gh-ci:{pr['title']}", "ci_only": True,
+                    "ci_rollup": pr["title"]})
+
+
+def test_gh_ci_fallback_only_fail_notifies_by_default(poll_mod, monkeypatch,
+                                                      sample_cfg):
+    """You just pushed, so a ``pending`` roll-up tells you nothing new: it (and
+    ``pass``) are returned ``quiet`` so the app remembers them silently."""
+    _ci_prs_and_rollups(poll_mod, monkeypatch)
+    items = poll_mod.gh_ci_fallback(sample_cfg, "octocat")
+    assert {it["ci_rollup"]: it.get("quiet", False) for it in items} == {
+        "fail": False, "pending": True, "pass": True}
+
+
+def test_gh_ci_fallback_ci_notify_configurable(poll_mod, monkeypatch,
+                                               sample_cfg):
+    _ci_prs_and_rollups(poll_mod, monkeypatch)
+    sample_cfg["github"]["ci_notify"] = ["fail", "pending"]
+    items = poll_mod.gh_ci_fallback(sample_cfg, "octocat")
+    assert {it["ci_rollup"]: it.get("quiet", False) for it in items} == {
+        "fail": False, "pending": False, "pass": True}
+    # An empty list turns CI notifications off entirely (all quiet).
+    sample_cfg["github"]["ci_notify"] = []
+    items = poll_mod.gh_ci_fallback(sample_cfg, "octocat")
+    assert all(it["quiet"] for it in items)
 
 
 # ---------------------------------------------------------------------------

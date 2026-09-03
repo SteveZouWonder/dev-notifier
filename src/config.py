@@ -36,11 +36,14 @@ DEFAULT_CONFIG = {
         "event_mode": True,
         "event_fields": ["status", "assignee"],
         "suppress_self": True,
+        "suppress_automation": True,
     },
     "github": {
         "enabled": True,
         "login": "",
         "suppress_self": True,
+        "ci_notify": ["fail"],
+        "emails": [],
     },
     "pagerduty": {
         "enabled": False,

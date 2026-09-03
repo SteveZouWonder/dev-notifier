@@ -7,7 +7,9 @@ token is stored).
 
 Item contract: ``{"fp", "title", "subtitle", "message", "url"}`` plus an
 optional ``"sound"`` (default True) that lets a source ask for a silent
-notification (e.g. low-urgency PagerDuty incidents).
+notification (e.g. low-urgency PagerDuty incidents), and an optional
+``"quiet"`` (default False) that asks the app to remember the item (mark it
+seen) without notifying at all (e.g. a passing/pending CI roll-up).
 
 @author SteveZou
 """
@@ -113,12 +115,21 @@ def _jira_search(cfg: dict, window_min: int) -> list:
         return []
 
 
+_JIRA_MYSELF_TTL_S = 6 * 3600  # re-fetch /myself at most every 6 hours
+_jira_myself_cache = {}  # (base_url, username) -> (fetched_at_epoch, accountId)
+
+
 def _jira_myself(cfg: dict) -> str:
     """Return the current Jira user's ``accountId`` (empty string on failure).
 
     Used to suppress notifications for changes/comments the user made
     themselves. ``accountId`` is compared rather than the display name because
     display names are not unique and are not present on every payload.
+
+    The lookup is cached per (base_url, username) for ``_JIRA_MYSELF_TTL_S``.
+    When a refresh fails, the last known id is reused (however old) instead of
+    returning "" — otherwise a single timeout on ``/myself`` would switch self-
+    suppression off for that poll and let all of your own changes through.
     """
     jira = cfg.get("jira", {})
     base = jira.get("base_url", "").rstrip("/")
@@ -126,6 +137,11 @@ def _jira_myself(cfg: dict) -> str:
     token = jira.get("api_token", "")
     if not (base and user and token):
         return ""
+    cache_key = (base, user)
+    now = datetime.now(timezone.utc).timestamp()
+    cached = _jira_myself_cache.get(cache_key)
+    if cached and now - cached[0] < _JIRA_MYSELF_TTL_S:
+        return cached[1]
     url = f"{base}/rest/api/3/myself"
     b64 = base64.b64encode(f"{user}:{token}".encode()).decode()
     req = urllib.request.Request(url, headers={
@@ -134,10 +150,43 @@ def _jira_myself(cfg: dict) -> str:
     })
     try:
         with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
-            return json.loads(resp.read().decode()).get("accountId", "")
+            account_id = json.loads(resp.read().decode()).get("accountId", "")
     except Exception as e:  # noqa: BLE001
+        if cached:
+            _log(f"WARN jira_myself: {e}; reusing cached accountId")
+            return cached[1]
         _log(f"ERROR jira_myself: {e}")
         return ""
+    if account_id:
+        _jira_myself_cache[cache_key] = (now, account_id)
+    return account_id
+
+
+def _is_jira_app_author(author: dict) -> bool:
+    """True when a changelog/comment author is an app or automation actor
+    (e.g. "Automation for Jira") rather than a person.
+
+    Jira Cloud tags such actors with ``accountType: "app"``; the display-name
+    check is a fallback for payloads that omit ``accountType``.
+    """
+    if not author:
+        return False
+    if author.get("accountType", "") == "app":
+        return True
+    return author.get("displayName", "").lower().startswith("automation for jira")
+
+
+def _history_targets_self(history: dict, self_id: str) -> bool:
+    """True when a changelog history hands the issue to the current user
+    (``assignee`` changed *to* ``self_id``). Such automation-made changes are
+    kept even when app-authored changes are otherwise suppressed.
+    """
+    if not self_id:
+        return False
+    for it in history.get("items", []):
+        if it.get("field", "") == "assignee" and it.get("to", "") == self_id:
+            return True
+    return False
 
 
 def _jira_changelog(cfg: dict, key: str) -> list:
@@ -185,11 +234,17 @@ def _issue_histories(issue: dict, cfg: dict) -> list:
     return histories
 
 
-def _events_from_changelog(issue, cfg, window_start, whitelist, self_id=""):
+def _events_from_changelog(issue, cfg, window_start, whitelist, self_id="",
+                           suppress_automation=False):
     """Yield event dicts for whitelisted changelog field changes in-window.
 
     When ``self_id`` is set, changes authored by the current user (matched on
     ``author.accountId``) are skipped so self-triggered edits do not notify.
+
+    When ``suppress_automation`` is set, changes made by apps/automation rules
+    (e.g. "Automation for Jira" transitioning a ticket after *you* opened a PR)
+    are skipped too — unless the change assigns the issue to you, which is
+    worth hearing about whoever's rule did it.
     """
     key = issue.get("key", "")
     f = issue.get("fields", {})
@@ -202,6 +257,9 @@ def _events_from_changelog(issue, cfg, window_start, whitelist, self_id=""):
             continue
         author_obj = h.get("author") or {}
         if self_id and author_obj.get("accountId", "") == self_id:
+            continue
+        if (suppress_automation and _is_jira_app_author(author_obj)
+                and not _history_targets_self(h, self_id)):
             continue
         author = author_obj.get("displayName", "")
         for it in h.get("items", []):
@@ -273,14 +331,36 @@ def _jira_items_events(cfg: dict, window_min: int, issues: list) -> list:
     # Resolve the current user's accountId once so self-triggered changes/
     # comments can be suppressed (only when suppress_self is enabled).
     self_id = _jira_myself(cfg) if jira.get("suppress_self", True) else ""
+    suppress_automation = bool(jira.get("suppress_automation", True))
     events = []
     for issue in issues:
         events += _events_from_changelog(issue, cfg, window_start, whitelist,
-                                         self_id)
+                                         self_id, suppress_automation)
         events += _events_from_comments(issue, cfg, window_start, self_id)
     # Oldest first for stable notification ordering.
     events.sort(key=lambda e: e["ts"])
     return [_event_to_item(ev, base) for ev in events]
+
+
+def _only_self_activity(issue: dict, cfg: dict, window_start, self_id: str) -> bool:
+    """True when every in-window changelog entry and comment on ``issue`` was
+    authored by the current user (and there is at least one). Used by the
+    legacy issue-level mode, whose fingerprint is the issue's ``updated`` stamp
+    and therefore cannot tell *who* touched the issue.
+    """
+    if not self_id:
+        return False
+    actors = []
+    for h in _issue_histories(issue, cfg):
+        ts = _parse_jira_dt(h.get("created", ""))
+        if ts is not None and ts >= window_start:
+            actors.append((h.get("author") or {}).get("accountId", ""))
+    f = issue.get("fields", {})
+    for c in (f.get("comment", {}) or {}).get("comments", []):
+        ts = _parse_jira_dt(c.get("created", ""))
+        if ts is not None and ts >= window_start:
+            actors.append((c.get("author") or {}).get("accountId", ""))
+    return bool(actors) and all(a == self_id for a in actors)
 
 
 def _jira_items_legacy(cfg: dict, window_min: int, issues: list) -> list:
@@ -289,8 +369,14 @@ def _jira_items_legacy(cfg: dict, window_min: int, issues: list) -> list:
     base = jira.get("base_url", "").rstrip("/")
     user = jira.get("username", "")
     window_start = datetime.now(timezone.utc) - timedelta(minutes=window_min)
+    self_id = _jira_myself(cfg) if jira.get("suppress_self", True) else ""
+    handle = user.split("@")[0].lower() if "@" in user else user.lower()
     items = []
     for issue in issues:
+        # ``suppress_self`` applies here too: skip issues whose only in-window
+        # activity is your own.
+        if _only_self_activity(issue, cfg, window_start, self_id):
+            continue
         key = issue.get("key", "")
         f = issue.get("fields", {})
         summary = f.get("summary", "")
@@ -302,7 +388,6 @@ def _jira_items_legacy(cfg: dict, window_min: int, issues: list) -> list:
             if cdt is None or cdt < window_start:
                 continue
             body = json.dumps(c.get("body", ""))
-            handle = user.split("@")[0].lower() if "@" in user else user.lower()
             if (handle and handle in body.lower()) or "mention" in body:
                 mentioned = True
         reason = "comment mention" if mentioned else "updated"
@@ -330,7 +415,15 @@ def jira_items(cfg: dict, window_min: int) -> list:
 # GitHub (via gh CLI)
 # ---------------------------------------------------------------------------
 
-def _gh_json(args: list):
+_GH_FAIL = object()  # sentinel: the gh call itself failed (network, auth, ...)
+
+
+def _gh_api(args: list):
+    """Run ``gh <args>`` and parse its JSON output.
+
+    Returns ``_GH_FAIL`` when the command fails (so callers that must tell
+    "no data" from "could not fetch" can), ``[]`` for empty output.
+    """
     try:
         out = subprocess.run(
             [_deps.gh_path()] + args, check=True, capture_output=True,
@@ -343,13 +436,24 @@ def _gh_json(args: list):
             _log(f"ERROR gh {' '.join(args)}: {err[:200]}")
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError, FileNotFoundError) as e:
         _log(f"ERROR gh {' '.join(args)}: {e}")
-    return []
+    return _GH_FAIL
+
+
+def _gh_json(args: list):
+    """Like ``_gh_api`` but folds failures into ``[]`` (fail-open)."""
+    data = _gh_api(args)
+    return [] if data is _GH_FAIL else data
+
+
+_gh_login_cache = {}  # "login" -> auto-detected login (never the empty string)
 
 
 def gh_login(cfg: dict) -> str:
     login = cfg.get("github", {}).get("login", "")
     if login:
         return login
+    if _gh_login_cache.get("login"):
+        return _gh_login_cache["login"]
     # `gh api user --jq .login` returns a bare string (not JSON), so call it
     # raw rather than through _gh_json (which would try json.loads and fail).
     try:
@@ -358,9 +462,12 @@ def gh_login(cfg: dict) -> str:
             check=True, capture_output=True, timeout=30,
             env=_deps.augmented_env(), **_deps.subprocess_kwargs(),
         ).stdout.strip()
-        return out
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        _log(f"WARN gh login lookup failed: {e}")
         return ""
+    if out:
+        _gh_login_cache["login"] = out
+    return out
 
 
 REASON_LABEL = {
@@ -382,21 +489,187 @@ def _html_url(api_url: str) -> str:
     return u.replace("/pulls/", "/pull/")
 
 
-def _gh_latest_actor(subject: dict) -> str:
+_GH_SUBJECT_RE = re.compile(
+    r"https://api\.github\.com/repos/([^/]+/[^/]+)/(?:pulls|issues)/(\d+)$")
+_GH_TIMELINE_PAGE = 100
+_GH_TIMELINE_MAX_PAGES = 5
+# Timeline entries that are side effects of someone *else's* action and name
+# the recipient (e.g. ``mentioned``'s actor is the person who was mentioned),
+# so they must not be mistaken for the latest actor.
+_GH_TIMELINE_PASSIVE = {"mentioned", "subscribed", "unsubscribed"}
+_GH_ACTOR_CACHE_MAX = 1000
+_gh_actor_cache = {}  # "<thread id>:<updated_at>" -> resolved actor login
+
+
+def _gh_user_login(obj) -> str:
+    """``login`` of a GitHub user object, or "" for null/malformed objects."""
+    return (obj.get("login") or "") if isinstance(obj, dict) else ""
+
+
+def _gh_timeline_last_page(repo: str, num: str):
+    """Return the newest page of an issue/PR timeline (oldest-first order),
+    walking at most ``_GH_TIMELINE_MAX_PAGES`` pages; ``_GH_FAIL`` on error."""
+    events = []
+    for page in range(1, _GH_TIMELINE_MAX_PAGES + 1):
+        data = _gh_api(["api", f"repos/{repo}/issues/{num}/timeline"
+                               f"?per_page={_GH_TIMELINE_PAGE}&page={page}"])
+        if data is _GH_FAIL:
+            return _GH_FAIL
+        if not isinstance(data, list) or not data:
+            break
+        events = data
+        if len(data) < _GH_TIMELINE_PAGE:
+            break
+    return events
+
+
+_gh_emails_cache = {}  # "auto" -> set of emails discovered via `gh api user`
+_gh_unlinked_hint_logged = set()  # emails already warned about (once each)
+
+
+def _gh_my_emails(cfg: dict) -> frozenset:
+    """Git author emails that count as *you* when GitHub cannot link a commit
+    to an account: ``github.emails`` from the config plus the public email on
+    your GitHub profile (looked up once per process; retried if it failed).
+    """
+    configured = {e.strip().lower()
+                  for e in (cfg.get("github", {}).get("emails") or [])
+                  if isinstance(e, str) and e.strip()}
+    if "auto" not in _gh_emails_cache:
+        data = _gh_api(["api", "user"])
+        if data is not _GH_FAIL:
+            email = data.get("email") if isinstance(data, dict) else None
+            _gh_emails_cache["auto"] = {email.lower()} if email else set()
+    return frozenset(configured | _gh_emails_cache.get("auto", set()))
+
+
+def _gh_commit_actor(repo: str, sha: str, me: str = "",
+                     my_emails: frozenset = frozenset(),
+                     own_thread: bool = False):
+    """Login behind a commit. The timeline's ``committed`` entries only carry
+    the git author name/email, so the commit is fetched for the linked GitHub
+    account. When GitHub has no link (the git email is not registered on the
+    account — a typo'd ``user.email`` is a classic cause), fall back to the
+    email list, and finally, on a PR *you* authored, assume the push was yours
+    (someone else pushing to your branch with an unregistered email is rare;
+    your own pushes are the common case).
+    """
+    commit = _gh_api(["api", f"repos/{repo}/commits/{sha}"]) if sha else {}
+    if commit is _GH_FAIL:
+        return _GH_FAIL
+    if not isinstance(commit, dict):
+        return ""
+    login = (_gh_user_login(commit.get("author"))
+             or _gh_user_login(commit.get("committer")))
+    if login or not me:
+        return login
+    email = (((commit.get("commit") or {}).get("author") or {})
+             .get("email") or "").lower()
+    if email in my_emails:
+        return me
+    if own_thread:
+        if email not in _gh_unlinked_hint_logged:
+            _gh_unlinked_hint_logged.add(email)
+            _log(f"WARN gh: commit {sha[:7]} by <{email}> is not linked to a "
+                 f"GitHub account; assuming it is yours (you authored the PR). "
+                 f"Add the address to your GitHub account or to github.emails "
+                 f"in config.json to make this explicit.")
+        return me
+    return ""
+
+
+def _gh_event_login(ev: dict) -> str:
+    """Login named by a (non-commit) timeline event, or ""."""
+    login = _gh_user_login(ev.get("actor")) or _gh_user_login(ev.get("user"))
+    comments = ev.get("comments")
+    if not login and isinstance(comments, list) and comments:
+        # ``line-commented`` / ``commit-commented`` group several comments.
+        login = _gh_user_login(comments[-1].get("user"))
+    return login
+
+
+def _gh_timeline_actor(repo: str, num: str, me: str = "",
+                       my_emails: frozenset = frozenset(),
+                       own_thread: bool = False):
+    """Return the login behind the most recent event on an issue/PR timeline.
+
+    The timeline lists comments, reviews, pushes (``committed``), review
+    requests, merges, closes, ... Returns "" when no entry identifies an actor
+    and ``_GH_FAIL`` when a request failed. ``me``/``my_emails``/``own_thread``
+    feed the push attribution fallbacks (see ``_gh_commit_actor``).
+    """
+    events = _gh_timeline_last_page(repo, num)
+    if events is _GH_FAIL:
+        return _GH_FAIL
+    for ev in reversed(events):
+        if not isinstance(ev, dict) or ev.get("event") in _GH_TIMELINE_PASSIVE:
+            continue
+        if ev.get("event") == "committed":
+            # A push: whoever's commit it is acted last (unknown -> "").
+            return _gh_commit_actor(repo, ev.get("sha") or "", me, my_emails,
+                                    own_thread)
+        login = _gh_event_login(ev)
+        if login:
+            return login
+    return ""
+
+
+def _gh_latest_actor(subject: dict, reason: str = "", me: str = "",
+                     my_emails: frozenset = frozenset()):
     """Return the login of whoever produced a thread's latest activity.
 
-    Reads ``subject.latest_comment_url`` (the API URL of the most recent
-    comment/review/commit) and returns its ``user.login``. Returns "" when the
-    URL is missing or the lookup fails, so callers fall back to notifying.
+    For pull requests and issues the thread timeline is consulted: GitHub's
+    ``subject.latest_comment_url`` names the newest *comment* only, so after a
+    push, review, review request, merge or close it is stale, empty, or points
+    at the PR itself — whose ``user`` is the PR *author*, not the actor. (That
+    last case used to make every review of your own PR look like your own
+    activity, and every push of yours look like someone else's.)
+
+    Other subject types (commits, releases, discussions) fall back to
+    ``latest_comment_url``. Returns "" when the actor cannot be identified (the
+    caller then notifies) and ``_GH_FAIL`` when a request failed (the caller
+    defers the thread to the next poll instead of guessing).
     """
-    url = (subject or {}).get("latest_comment_url") or ""
-    if not url:
+    subject = subject or {}
+    url = subject.get("url") or ""
+    m = _GH_SUBJECT_RE.match(url)
+    if m:
+        return _gh_timeline_actor(m.group(1), m.group(2), me, my_emails,
+                                  own_thread=(reason == "author"))
+    latest = subject.get("latest_comment_url") or ""
+    if not latest:
         return ""
     # gh api expects a path or full URL; pass the full URL through as-is.
-    data = _gh_json(["api", url])
+    data = _gh_api(["api", latest])
+    if data is _GH_FAIL:
+        return _GH_FAIL
     if not isinstance(data, dict):
         return ""
-    return (data.get("user") or {}).get("login", "")
+    # Comments/reviews carry ``user``; commits carry ``author``/``committer``.
+    return (_gh_user_login(data.get("user"))
+            or _gh_user_login(data.get("author"))
+            or _gh_user_login(data.get("committer")))
+
+
+def _gh_thread_actor(notif: dict, me: str = "",
+                     my_emails: frozenset = frozenset()):
+    """``_gh_latest_actor`` memoised per (thread id, updated_at).
+
+    Unread threads are returned by ``gh api notifications`` on every poll until
+    they are read, so without this the same actor lookups repeat every minute.
+    A thread's ``updated_at`` changes with each new activity, which invalidates
+    the entry naturally. Failures are not cached (so they are retried).
+    """
+    key = f"{notif.get('id', '')}:{notif.get('updated_at', '')}"
+    if key in _gh_actor_cache:
+        return _gh_actor_cache[key]
+    actor = _gh_latest_actor(notif.get("subject") or {},
+                             notif.get("reason", ""), me, my_emails)
+    if actor is not _GH_FAIL:
+        if len(_gh_actor_cache) >= _GH_ACTOR_CACHE_MAX:
+            _gh_actor_cache.clear()
+        _gh_actor_cache[key] = actor
+    return actor
 
 
 def gh_notifications(cfg: dict, login: str = "") -> list:
@@ -406,16 +679,33 @@ def gh_notifications(cfg: dict, login: str = "") -> list:
     notifs = _gh_json(["api", "notifications"])
     # Only look up the latest actor when we can compare it to a known login.
     suppress_self = gh.get("suppress_self", True) and bool(login)
+    me = login.lower()  # GitHub logins are case-insensitive
+    my_emails = _gh_my_emails(cfg) if suppress_self else frozenset()
     items = []
     for n in notifs:
         reason = n.get("reason", "")
         if reason not in RELEVANT_REASONS:
             continue
         subj = n.get("subject", {}) or {}
-        # Suppress threads whose only latest activity was triggered by you
-        # (e.g. reason "author" when you just pushed/commented on your own PR).
-        if suppress_self and _gh_latest_actor(subj) == login:
-            continue
+        if suppress_self:
+            # ``ci_activity`` is, by GitHub's definition, "a workflow run that
+            # *you* triggered" — always self-caused. CI on your open PRs is
+            # covered by ``gh_ci_fallback`` anyway.
+            if reason == "ci_activity":
+                continue
+            # Suppress threads whose latest activity was your own (e.g. reason
+            # "author" right after you pushed to / commented on your own PR).
+            actor = _gh_thread_actor(n, login, my_emails)
+            if actor is _GH_FAIL:
+                # Could not tell who acted. Do not guess: skipping the item here
+                # leaves it un-seen, so it is re-evaluated next poll (the thread
+                # stays unread on GitHub until then).
+                _log(f"WARN gh: actor lookup failed for thread "
+                     f"{n.get('id', '')} ({subj.get('title', '')[:60]}); "
+                     f"retrying next poll")
+                continue
+            if actor.lower() == me:
+                continue
         repo = (n.get("repository", {}) or {}).get("full_name", "")
         api_url = subj.get("url") or ""
         if api_url:
@@ -466,8 +756,20 @@ def _ci_rollup_for_pr(pr: dict):
     }
 
 
+_CI_NOTIFY_DEFAULT = ["fail"]
+
+
 def gh_ci_fallback(cfg: dict, login: str) -> list:
-    if not (cfg.get("github", {}).get("enabled") and login):
+    """CI roll-up items for your own open PRs.
+
+    Every roll-up state is returned (so the app can mark it seen), but only the
+    states listed in ``github.ci_notify`` (default: just ``fail``) actually
+    notify; the rest are flagged ``quiet``. A push of yours always produces a
+    ``pending`` first, which you already know about — so it is silent unless
+    asked for.
+    """
+    gh = cfg.get("github", {})
+    if not (gh.get("enabled") and login):
         return []
     prs = _gh_json([
         "search", "prs", f"--author={login}", "--state=open",
@@ -475,10 +777,13 @@ def gh_ci_fallback(cfg: dict, login: str) -> list:
     ])
     if not prs:
         return []
+    notify = set(gh.get("ci_notify", _CI_NOTIFY_DEFAULT) or [])
     items = []
     with ThreadPoolExecutor(max_workers=8) as pool:
         for result in pool.map(_ci_rollup_for_pr, prs):
             if result:
+                if result.get("ci_rollup") not in notify:
+                    result["quiet"] = True
                 items.append(result)
     return items
 
