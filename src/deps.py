@@ -213,23 +213,74 @@ def login_item_enabled() -> bool:
     return LAUNCH_AGENT_PLIST.exists()
 
 
-def enable_login_item() -> bool:
+def login_item_blocked_reason():
+    """Why "Start at login" cannot be enabled right now, or ``None``.
+
+    The LaunchAgent records the app's *current* path. When the app is running
+    straight from the mounted disk image (the user double-clicked it inside the
+    DMG window instead of dragging it to Applications) that path disappears as
+    soon as the image is ejected, so login-launch would silently do nothing.
+    """
+    target = _app_launch_target()
+    path = target[-1] if target else ""
+    if path.startswith("/Volumes/"):
+        return ("Dev Notifier is running from the disk image. Drag it to "
+                "Applications first, then turn on Start at login.")
+    return None
+
+
+def _write_launch_agent() -> bool:
     LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     plist = {
         "Label": LAUNCH_AGENT_LABEL,
         "ProgramArguments": _app_launch_target(),
         "RunAtLoad": True,
         "ProcessType": "Interactive",
+        # Only load in a GUI login session (not over SSH), where ``open`` works.
+        "LimitLoadToSessionType": "Aqua",
     }
     try:
         with LAUNCH_AGENT_PLIST.open("wb") as f:
             plistlib.dump(plist, f)
-        # load (best effort; ignore if already loaded)
-        _run(["launchctl", "unload", str(LAUNCH_AGENT_PLIST)])
-        _run(["launchctl", "load", str(LAUNCH_AGENT_PLIST)])
         return True
     except OSError:
         return False
+
+
+def enable_login_item() -> bool:
+    if login_item_blocked_reason():
+        return False
+    if not _write_launch_agent():
+        return False
+    # Load now so it is registered without a re-login. launchd also picks the
+    # plist up at the next login regardless, so a non-zero exit here (e.g. the
+    # job was already loaded) is logged by the caller but not fatal.
+    _run(["launchctl", "unload", str(LAUNCH_AGENT_PLIST)])
+    _run(["launchctl", "load", str(LAUNCH_AGENT_PLIST)])
+    return True
+
+
+def repair_login_item() -> bool:
+    """Re-point an existing LaunchAgent at the app's current location.
+
+    The plist stores an absolute path. If the user later moved/renamed the
+    app (or installed an update into a different folder), login-launch would
+    silently break — or start an old copy — while the menu still showed the
+    toggle as on. Called at startup; rewrites the plist only when the stored
+    path differs from where the app is running now (and the app is not running
+    from a mounted DMG). Returns True when a repair was written.
+    """
+    if not LAUNCH_AGENT_PLIST.exists() or login_item_blocked_reason():
+        return False
+    try:
+        with LAUNCH_AGENT_PLIST.open("rb") as f:
+            current = plistlib.load(f)
+    except (OSError, plistlib.InvalidFileException, ValueError):
+        current = {}
+    want = _app_launch_target()
+    if current.get("ProgramArguments") == want:
+        return False
+    return _write_launch_agent()
 
 
 def disable_login_item() -> bool:

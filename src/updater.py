@@ -48,7 +48,7 @@ RELEASES_PAGE = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/lates
 # into the bundle (``APP_VERSION`` data file on both platforms, plus Info.plist
 # on macOS), and ``current_version()`` reads that first. From-source runs skip
 # update prompts anyway.
-__version__ = "1.3.0"
+__version__ = "1.5.8"
 
 # Name of the version stamp file the PyInstaller specs bundle next to the app's
 # data (``sys._MEIPASS/APP_VERSION``). Contents: the bare version, e.g. 1.5.9.
@@ -359,6 +359,31 @@ def _open_installer(path: str) -> None:
         subprocess.run(["open", path], check=False)
 
 
+def install_instructions(platform: str = None):
+    """``(subtitle, message)`` describing what to do after the download opens.
+
+    The wording differs by platform: Windows launches a real installer that
+    replaces and relaunches the app, whereas macOS only mounts the DMG and the
+    user must quit, drag-replace and relaunch by hand (and may hit Gatekeeper
+    again, because the build is not Developer-ID signed).
+    """
+    plat = platform if platform is not None else sys.platform
+    if plat == "win32":
+        return ("Installer opened",
+                "Follow the installer — it replaces the old version and "
+                "relaunches Dev Notifier.")
+    return ("Disk image opened",
+            "Quit Dev Notifier, drag the new app into Applications "
+            "(Replace), then relaunch. If macOS says the app is damaged, "
+            "run: xattr -dr com.apple.quarantine /Applications/DevNotifier.app")
+
+
+def download_action_label(platform: str = None) -> str:
+    """Menu label for the update action, honest about what it does."""
+    plat = platform if platform is not None else sys.platform
+    return "Download & Install" if plat == "win32" else "Download update…"
+
+
 def download_and_open(info: dict, log=None) -> dict:
     """Download the release installer, verify SHA-256, then open it.
 
@@ -405,22 +430,35 @@ def download_and_open(info: dict, log=None) -> dict:
         got = hasher.hexdigest().lower()
         _log(f"UPDATE downloaded {dest} sha256={got}")
 
-        # Verify against SHA256SUMS.txt when available (best effort).
+        # Verify against the release's SHA256SUMS.txt. This is *mandatory*: the
+        # app is not Developer-ID signed, so the checksum is the only integrity
+        # check the download gets. If the sums file is missing, unreachable or
+        # does not list the asset, the download is discarded and the user is
+        # pointed at the Releases page rather than silently opened unverified.
         want = None
+        why = "checksum file not published for this release"
         if info.get("sha256_url"):
             try:
                 sums = _http_get(info["sha256_url"], accept="text/plain").decode("utf-8")
                 want = _parse_sha256sums(sums, asset_name)
+                if not want:
+                    why = f"{asset_name} is not listed in SHA256SUMS.txt"
             except (urllib.error.URLError, urllib.error.HTTPError,
                     TimeoutError, OSError, ValueError) as e:
                 _log(f"UPDATE WARN could not fetch checksums: {e}")
-        if want and want != got:
+                why = f"could not fetch checksums ({e})"
+        if not want or want != got:
             try:
                 dest.unlink()
             except OSError:
                 pass
-            return {"ok": False, "path": None,
-                    "error": "Checksum mismatch — download discarded."}
+            if want:
+                error = "Checksum mismatch — download discarded."
+            else:
+                error = (f"Could not verify the download ({why}) — discarded. "
+                         f"Download it from the Releases page instead.")
+            _log(f"UPDATE ERROR {error}")
+            return {"ok": False, "path": None, "error": error}
 
         _open_installer(str(dest))
         return {"ok": True, "path": str(dest), "error": None}

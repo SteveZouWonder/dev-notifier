@@ -146,3 +146,9 @@ class MacOSBackend(TrayBackend):
 
     def disable_login_item(self):
         return _deps.disable_login_item()
+
+    def login_item_blocked_reason(self):
+        return _deps.login_item_blocked_reason()
+
+    def repair_login_item(self):
+        return _deps.repair_login_item()

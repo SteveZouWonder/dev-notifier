@@ -134,6 +134,40 @@ def test_macos_login_item_delegates_to_deps(macos_backend, monkeypatch):
     assert calls == ["enabled", "enable", "disable"]
 
 
+def test_macos_login_item_repair_and_block_delegate_to_deps(macos_backend,
+                                                            monkeypatch):
+    import platform_backend.macos as macos_mod
+    monkeypatch.setattr(macos_mod._deps, "login_item_blocked_reason",
+                        lambda: "on a DMG")
+    monkeypatch.setattr(macos_mod._deps, "repair_login_item", lambda: True)
+    assert macos_backend.login_item_blocked_reason() == "on a DMG"
+    assert macos_backend.repair_login_item() is True
+
+
+def test_base_backend_login_item_hooks_default(fake_backend):
+    """Backends that don't override the optional hooks get safe defaults."""
+    from platform_backend.base import TrayBackend
+
+    class Minimal(TrayBackend):
+        def setup(self, name, icon): pass
+        def run(self): pass
+        def quit(self): pass
+        def run_on_main(self, fn): fn(None)
+        def set_icon(self, path): pass
+        def set_title(self, title): pass
+        def set_menu(self, items): pass
+        def add_timer(self, fn, interval_s): return None
+        def notify(self, **k): pass
+        def open_url(self, url): pass
+        def login_item_enabled(self): return False
+        def enable_login_item(self): return True
+        def disable_login_item(self): return True
+
+    b = Minimal()
+    assert b.login_item_blocked_reason() is None
+    assert b.repair_login_item() is False
+
+
 def test_macos_run_on_main_uses_callafter(macos_backend, fake_rumps):
     # fake_rumps stubs PyObjCTools.AppHelper.callAfter to run fn(None) inline.
     ran = {"done": False, "arg": "unset"}

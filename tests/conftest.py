@@ -22,8 +22,18 @@ def temp_home(tmp_path, monkeypatch):
     Modules that compute paths at import time (config, deps, updater) resolve
     ``Path.home()`` in module globals, so we patch and reload them to pick up
     the temp home.
+
+    ``paths.config_dir()`` does not use the home dir everywhere: Windows reads
+    ``%APPDATA%`` / ``%LOCALAPPDATA%`` and Linux honours ``$XDG_*``. Point
+    those at the temp dir too, otherwise tests on the Windows CI runner write
+    to (and leak state between tests via) the runner's real AppData.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     yield tmp_path
 
@@ -216,6 +226,10 @@ class FakeBackend:
         self.ran = False
         self.quit_called = False
         self._login_enabled = False
+        self.login_blocked = None   # reason string to simulate "can't enable"
+        self.repaired = False       # repair_login_item() return value
+        self.enable_ok = True       # enable_login_item() success flag
+        self.disable_ok = True      # disable_login_item() success flag
 
     # lifecycle
     def setup(self, name, icon):
@@ -263,12 +277,22 @@ class FakeBackend:
         return self._login_enabled
 
     def enable_login_item(self):
+        if not self.enable_ok:
+            return False
         self._login_enabled = True
         return True
 
     def disable_login_item(self):
+        if not self.disable_ok:
+            return False
         self._login_enabled = False
         return True
+
+    def login_item_blocked_reason(self):
+        return self.login_blocked
+
+    def repair_login_item(self):
+        return self.repaired
 
 
 @pytest.fixture

@@ -45,23 +45,34 @@ change requested
 
 ## Project overview
 
-Dev Notifier is a **macOS menu-bar app** that polls Jira and GitHub for items
-relevant to the current user and shows native, clickable desktop notifications.
+Dev Notifier is a **menu-bar / system-tray app (macOS + Windows)** that polls
+Jira, GitHub and PagerDuty for items relevant to the current user and shows
+native, clickable desktop notifications.
 
-- UI layer: `rumps` (AppKit/PyObjC) — **macOS only**.
+- UI layer: abstracted behind `src/platform_backend/` — macOS uses `rumps`
+  (AppKit/PyObjC), Windows uses `pystray` + `winotify`. `notifier_app.py` is
+  toolkit-neutral and only talks to the backend interface.
 - Entry point: `launcher.py` -> `src/notifier_app.py`.
-- Data sources: `src/poll.py` (Jira REST API + `gh` CLI for GitHub).
-- Config/state/logs live under `~/.config/dev-notifier/` (never in the repo).
+- Data sources: `src/poll.py` (Jira REST API + `gh` CLI for GitHub + PagerDuty
+  REST API). Each fetch records failures via `_record_error`; `collect_all`
+  returns them in `extra["errors"]` and the app holds the poll cursor when a
+  source failed. Keep that contract when adding a source.
+- Config/state/logs live under `~/.config/dev-notifier/` (macOS) or
+  `%APPDATA%\dev-notifier\` (Windows) — see `src/paths.py`; never in the repo.
+- Never write the in-memory config back to disk wholesale: use
+  `config.save_config_patch({...})` so a corrupt/first-run file is not clobbered.
 
 ### Layout
 
 | Path | Purpose |
 |------|---------|
-| `src/notifier_app.py` | Menu-bar app: timers, notifications, menu, threading |
-| `src/poll.py` | Fetch Jira/GitHub/PagerDuty items (pure data gathering) |
-| `src/deps.py` | Dependency checks + login-item (LaunchAgent) management |
-| `src/config.py` | Config file loading/defaults |
-| `src/updater.py` | Auto-update checks against GitHub Releases |
+| `src/notifier_app.py` | Tray app logic: timers, notifications, menu, threading (toolkit-neutral) |
+| `src/platform_backend/` | `base.py` interface + `macos.py` (rumps) / `windows.py` (pystray, winotify) |
+| `src/poll.py` | Fetch Jira/GitHub/PagerDuty items (pure data gathering + per-source error tracking) |
+| `src/deps.py` | Dependency checks + macOS login-item (LaunchAgent) management |
+| `src/config.py` | Config file loading/defaults, validation, safe patch-writes |
+| `src/paths.py` | Per-platform config/cache directories |
+| `src/updater.py` | Auto-update checks against GitHub Releases (SHA-256 verified downloads) |
 | `scripts/` | Icon generation, CHANGELOG tooling, release-notes backfill |
 | `packaging/` | PyInstaller spec + macOS packaging |
 | `tests/` | pytest suite (uses `fake_rumps` stub to run on Linux) |
@@ -76,10 +87,12 @@ relevant to the current user and shows native, clickable desktop notifications.
   ```
 - CI enforces **>= 95% coverage** on the app source (`--cov-fail-under=95`).
   Keep new logic covered; aim to not drop coverage.
-- Tests must run on **Linux CI without rumps/PyObjC installed**. The
-  `fake_rumps` fixture (`tests/conftest.py`) stubs `rumps` **and**
-  `PyObjCTools`. If you add a new macOS-only top-level import in `src/`, extend
-  that stub so `import notifier_app` still works on Linux.
+- Tests must run on **Linux CI without rumps/PyObjC/pystray installed**. The
+  `fake_rumps` / `fake_pystray` / `fake_winotify` / `fake_winreg` fixtures
+  (`tests/conftest.py`) stub the platform toolkits; app-logic tests drive
+  `NotifierApp` through the recording `FakeBackend`. If you add a backend
+  method, add it to `FakeBackend` too.
+- Supported Python: **3.9+** (CI matrix 3.9–3.12). Don't use 3.10+-only syntax.
 - Mark tests that require real rumps/AppKit with `@pytest.mark.macos`; they are
   excluded on Linux (`-m "not macos"`) and run on the macOS CI job.
 - Keep tests hermetic: no real network, subprocess, or writes to the real

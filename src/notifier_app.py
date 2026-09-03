@@ -35,6 +35,25 @@ DEFAULT_THEME = "Orange"
 RECENT_KEEP_LIMIT = 100   # persisted to state.json
 RECENT_MENU_LIMIT = 10    # rendered in the menu
 
+# Burst protection: when one poll finds more than this many new items (first
+# launch, back from a weekend offline, a long VPN outage) they are folded into
+# a single digest notification instead of a machine-gun of pop-ups. Every
+# item still lands in the Recent list and is marked seen.
+MAX_NOTIFICATIONS_PER_POLL = 5
+
+# "Pause notifications" durations (label, seconds). ``None`` = until resumed.
+PAUSE_OPTIONS = [
+    ("For 1 hour", 3600),
+    ("For 4 hours", 4 * 3600),
+    ("Until I resume", None),
+]
+PAUSED_INDEFINITELY = -1  # sentinel stored in state["paused_until"]
+
+# Warning glyph shown next to the tray icon while a source is failing or the
+# config has problems, so silent failures are not silent.
+WARNING_BADGE = "\u26a0"  # ⚠
+PAUSED_BADGE = "\u23f8"   # ⏸
+
 
 def _assets_dir():
     """Locate the assets dir both from source and inside a PyInstaller bundle."""
@@ -69,12 +88,47 @@ def _theme_checking_icon(theme: str):
 
 
 def _save_config(cfg: dict) -> None:
+    """Write a whole config dict (atomically). Used by tests/tooling only.
+
+    The app itself never writes its in-memory config back: that dict may be the
+    runtime defaults (first run, or a corrupt file) and would clobber the
+    user's real settings. Menu actions go through ``cfg_mod.save_config_patch``
+    which patches only the key that changed.
+    """
     try:
-        cfg_mod.config_path().write_text(
-            json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        cfg_mod._write_json(cfg_mod.config_path(), cfg)
     except OSError as e:
         _log(f"ERROR writing config: {e}")
+
+
+def _ago(ts) -> str:
+    """Compact "how long ago" label for an epoch timestamp."""
+    if not ts:
+        return "never"
+    secs = max(0, int(time.time() - ts))
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{secs // 60} min ago"
+    if secs < 86400:
+        return f"{secs // 3600} h ago"
+    return f"{secs // 86400} d ago"
+
+
+def _stop_timer(sender, fallback=None) -> None:
+    """Stop a one-shot timer via whatever handle the backend passed.
+
+    rumps passes its ``Timer`` as the sender; the Windows backend passes its
+    own timer object. Fall back to the handle ``add_timer`` returned so a
+    backend that passes nothing still gets its one-shot stopped.
+    """
+    for t in (sender, fallback):
+        if t is not None and hasattr(t, "stop"):
+            try:
+                t.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            return
 
 
 def _log(msg: str) -> None:
@@ -129,23 +183,36 @@ class NotifierApp:
     # Old theme names -> current ones (config migration).
     THEME_ALIASES = {"Bell": "Yellow"}
 
+    @classmethod
+    def _normalize_theme(cls, cfg: dict) -> str:
+        theme = cfg.get("theme", DEFAULT_THEME)
+        theme = cls.THEME_ALIASES.get(theme, theme)
+        if theme not in THEMES:
+            theme = DEFAULT_THEME
+        cfg["theme"] = theme
+        return theme
+
     def __init__(self, backend=None):
         self.backend = backend if backend is not None else get_backend()
         self.cfg = cfg_mod.ensure_config()
-        theme = self.cfg.get("theme", DEFAULT_THEME)
-        theme = self.THEME_ALIASES.get(theme, theme)
-        if theme not in THEMES:
-            theme = DEFAULT_THEME
-        self.cfg["theme"] = theme
+        self.cfg_problems = cfg_mod.last_problems()
+        theme = self._normalize_theme(self.cfg)
         icon = _theme_icon(theme)
         # Colored (non-template) icon so themes show their color in the tray.
         self.backend.setup(name="DevNotifier", icon=icon)
         self.icon = icon
         self.title = None
-        if not icon:  # fallback to an emoji if the PNG is missing
-            self.title = "\U0001f514"
-            self.backend.set_title(self.title)
+        # Emoji fallback if the PNG is missing; badges (⚠ / ⏸) are appended.
+        self._base_title = "\U0001f514" if not icon else ""
         self.state = _load_state()
+        # Outcome of the most recent poll attempt: when it ran and which
+        # sources failed (source -> short reason). Rendered in Status ▸ and as
+        # a ⚠ badge next to the tray icon.
+        self.poll_status = {"at": None, "errors": {}}
+        self._notified_errors = None   # last error set the user was told about
+        self._last_unusable_key = None  # last "nothing to check" problem set
+        self._paused_until = self.state.get("paused_until")
+        self._refresh_title()
         # Recent list persists in state.json so it survives restarts/upgrades.
         # Trim to the keep-limit on load in case an older/larger file exists.
         self.recent = list(self.state.get("recent", []))[:RECENT_KEEP_LIMIT]
@@ -192,12 +259,20 @@ class NotifierApp:
         # incidents assigned to you), rendered as a "PagerDuty ▸" submenu.
         self.pd_status = {}
         self.menu = []  # neutral MenuItem list (also read by tests)
+        # If the app was moved since "Start at login" was enabled, re-point the
+        # registration at the current location (macOS LaunchAgent stores an
+        # absolute path). Cheap file check; never fatal.
+        try:
+            if self.backend.repair_login_item():
+                _log("login item re-pointed at the current app location")
+        except Exception as e:  # noqa: BLE001
+            _log(f"WARN login item repair failed: {e}")
         self._build_menu()
         # Run the first dependency check + startup warning shortly after the
         # event loop starts, so the icon shows up instantly.
         self._startup_timer = self.backend.add_timer(self._initial_check, 0.5)
-        interval = self.cfg.get("poll", {}).get("interval_seconds", 300)
-        self.timer = self.backend.add_timer(self.on_tick, interval)
+        self._poll_interval = self._interval_from(self.cfg)
+        self.timer = self.backend.add_timer(self.on_tick, self._poll_interval)
         # Update checks: one shortly after launch (one-shot), then on a slow
         # recurring timer. Both run the network call on a worker thread so the
         # tray never blocks.
@@ -212,14 +287,42 @@ class NotifierApp:
     def run(self):
         self.backend.run()
 
+    @staticmethod
+    def _interval_from(cfg: dict) -> int:
+        try:
+            return max(30, int(cfg.get("poll", {}).get("interval_seconds", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    def _apply_cfg(self, cfg: dict) -> None:
+        """Adopt a freshly loaded config (main thread).
+
+        Normalizes the theme and, when ``poll.interval_seconds`` changed,
+        restarts the poll timer so edits take effect without a relaunch.
+        """
+        self._normalize_theme(cfg)
+        self.cfg = cfg
+        self.cfg_problems = cfg_mod.last_problems()
+        interval = self._interval_from(cfg)
+        if interval != getattr(self, "_poll_interval", interval):
+            _log(f"poll interval changed {self._poll_interval}s -> {interval}s")
+            self._poll_interval = interval
+            try:
+                self.timer.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.timer = self.backend.add_timer(self.on_tick, interval)
+
     def _initial_check(self, sender):
         """Kick off the first dependency check in the background (one-shot)."""
-        sender.stop()
+        _stop_timer(sender, getattr(self, "_startup_timer", None))
 
         def worker():
-            status = deps_mod.check_dependencies(self.cfg)
+            cfg = cfg_mod.ensure_config()
+            status = deps_mod.check_dependencies(cfg)
 
             def apply(_):
+                self._apply_cfg(cfg)
                 self.dep_status = status
                 self._build_menu()
                 self._warn_if_unmet()
@@ -231,7 +334,7 @@ class NotifierApp:
     # -- update checks ------------------------------------------------------
     def _initial_update_check(self, sender):
         """One-shot update check shortly after launch (off the startup path)."""
-        sender.stop()
+        _stop_timer(sender, getattr(self, "_update_startup_timer", None))
         self._run_update_check(notify=True)
 
     def _on_update_tick(self, _):
@@ -254,13 +357,16 @@ class NotifierApp:
             def apply(_):
                 self.update_info = info
                 self._build_menu()
+                if info.get("error"):
+                    _log(f"WARN update check failed: {info['error']}")
                 if manual and not info.get("available"):
                     if info.get("from_source"):
                         sub, msg = "Running from source", \
                             "Update checks apply to installed builds only."
                     elif info.get("error"):
-                        sub, msg = "Couldn't check", \
-                            "Check your network and try again."
+                        sub = "Couldn't check"
+                        msg = (f"{str(info['error'])[:120]} — check your "
+                               "network / proxy and try again.")
                     else:
                         sub, msg = "Up to date", \
                             f"You're on the latest version ({info['current']})."
@@ -306,11 +412,10 @@ class NotifierApp:
 
             def apply(_):
                 if result.get("ok"):
+                    sub, msg = updater_mod.install_instructions()
                     self._post_notification(
                         title="Dev Notifier — update ready",
-                        subtitle="Installer opened",
-                        message="Follow the installer to replace the old "
-                                "version, then relaunch.",
+                        subtitle=sub, message=msg,
                         data={}, sound=True,
                     )
                 else:
@@ -333,7 +438,8 @@ class NotifierApp:
         ver = self.update_info.get("latest", "")
         if ver:
             self.cfg.setdefault("update", {})["skipped_version"] = ver
-            _save_config(self.cfg)
+            if not cfg_mod.save_config_patch({"update": {"skipped_version": ver}}):
+                _log("WARN: skipped version not saved (config.json unreadable)")
             self.update_info["available"] = False
             self._build_menu()
             _log(f"update {ver} skipped")
@@ -346,6 +452,25 @@ class NotifierApp:
         AppHelper.callAfter; Windows: inline).
         """
         self.backend.run_on_main(fn)
+
+    def _has_problems(self) -> bool:
+        return bool(self.poll_status.get("errors") or self.cfg_problems)
+
+    def _refresh_title(self):
+        """Tray title = emoji fallback (no icon) + ⚠ / ⏸ badges (main thread).
+
+        The badge is how a silent failure stops being silent: a source that
+        keeps failing (bad token, network down) shows ⚠ next to the icon until
+        it recovers; the Status submenu says which source and why.
+        """
+        parts = [self._base_title]
+        if self._has_problems():
+            parts.append(WARNING_BADGE)
+        if self._is_paused():
+            parts.append(PAUSED_BADGE)
+        title = " ".join(p for p in parts if p) or None
+        self.title = title
+        self.backend.set_title(title)
 
     def _enter_checking(self):
         """Show the themed 'checking' spinner icon + in-menu hint (main thread)."""
@@ -388,16 +513,21 @@ class NotifierApp:
         self.backend.notify(**kwargs)
 
     def _warn_if_unmet(self):
-        """On startup, if nothing is usable, guide the user via a notification."""
+        """On startup, if nothing is usable, guide the user via a notification.
+
+        The notification carries the config file as its URL so its "Open"
+        button takes the user straight to the file they need to edit.
+        """
         if not self.dep_status.get("ok"):
             msg = self.dep_status["problems"][0] if self.dep_status["problems"] \
                 else "Open config file to set up Jira/GitHub/PagerDuty."
+            self._last_unusable_key = tuple(self.dep_status.get("problems") or [])
             try:
                 self._post_notification(
                     title="Dev Notifier — setup needed",
                     subtitle="No working source yet",
                     message=msg,
-                    data={},
+                    data={"url": str(cfg_mod.config_path())},
                     sound=False,
                 )
             except Exception:  # noqa: BLE001
@@ -415,6 +545,7 @@ class NotifierApp:
         pd_item = self._pagerduty_menuitem()
         if pd_item is not None:
             items.append(pd_item)
+        items.append(self._pause_menuitem())
         items.append(MenuItem.sep())
         if self.recent:
             items.append(MenuItem("Recent:", callback=None))
@@ -506,51 +637,125 @@ class NotifierApp:
         if url:
             self.backend.open_url(url)
 
+    # -- pause / resume -------------------------------------------------------
+    def _is_paused(self) -> bool:
+        until = self._paused_until
+        if until is None:
+            return False
+        if until == PAUSED_INDEFINITELY:
+            return True
+        if time.time() < until:
+            return True
+        # Expired: clear it (persisted lazily with the next state write).
+        self._paused_until = None
+        self.state.pop("paused_until", None)
+        return False
+
+    def _pause_menuitem(self):
+        if self._is_paused():
+            until = self._paused_until
+            if until == PAUSED_INDEFINITELY:
+                label = "Resume notifications (paused)"
+            else:
+                when = datetime.fromtimestamp(until).strftime("%H:%M")
+                label = f"Resume notifications (paused until {when})"
+            return MenuItem(label, callback=self._resume_notifications)
+        parent = MenuItem("Pause notifications")
+        for label, secs in PAUSE_OPTIONS:
+            item = MenuItem(label, callback=self._pause_notifications)
+            item.pause_seconds = secs
+            parent.add(item)
+        return parent
+
+    def _pause_notifications(self, sender):
+        secs = getattr(sender, "pause_seconds", None)
+        self._paused_until = (PAUSED_INDEFINITELY if secs is None
+                              else time.time() + secs)
+        self.state["paused_until"] = self._paused_until
+        _save_state(self.state, self.cfg)
+        _log(f"notifications paused ({'until resumed' if secs is None else f'{secs}s'})")
+        self._refresh_title()
+        self._build_menu()
+
+    def _resume_notifications(self, _):
+        self._paused_until = None
+        self.state.pop("paused_until", None)
+        _save_state(self.state, self.cfg)
+        _log("notifications resumed")
+        self._refresh_title()
+        self._build_menu()
+
+    # -- status -------------------------------------------------------------
+    def _last_check_line(self) -> str:
+        """"Last check: …" line for the Status submenu."""
+        at = self.poll_status.get("at")
+        if not at:
+            last_ok = self.state.get("last_poll")
+            return (f"Last check: {_ago(last_ok)} (before this launch)"
+                    if last_ok else "Last check: not yet")
+        line = f"Last check: {_ago(at)}"
+        errors = self.poll_status.get("errors") or {}
+        if errors:
+            line += f" · ⚠ {', '.join(sorted(errors))} failed"
+        else:
+            line += " ✓"
+        return line
+
+    def _source_line(self, name: str, source: str, ok: bool, enabled: bool,
+                     needs: str, suffix: str = "") -> str:
+        """One "Source: state" line, preferring a live poll error over the
+        static config check (so a wrong token is not shown as ✓)."""
+        err = (self.poll_status.get("errors") or {}).get(source)
+        if ok and err:
+            return f"{name}: ⚠ {err}"[:90]
+        if ok:
+            return f"{name}: ✓ Ready{suffix}"
+        if enabled:
+            return f"{name}: ⚠ {needs}"
+        return f"{name}: Off"
+
     def _status_menuitem(self):
-        """Status ▸ submenu with one short line per source (Jira / GitHub)."""
+        """Status ▸ submenu: last check + one short line per source."""
         s = self.dep_status
+        parent = MenuItem("Status", callback=self._recheck_deps)
+        parent.add(MenuItem(self._last_check_line(), callback=None))
         if s.get("pending"):
             # First background check hasn't finished yet.
-            parent = MenuItem("Status", callback=self._recheck_deps)
             parent.add(MenuItem("Checking…", callback=None))
-            parent.add(MenuItem.sep())
-            parent.add(MenuItem("Re-check now", callback=self._recheck_deps))
-            return parent
-        if s["jira_ok"]:
-            jira_line = "Jira: ✓ Ready"
-        elif s["jira"]["enabled"]:
-            jira_line = "Jira: ⚠ Needs setup"
         else:
-            jira_line = "Jira: Off"
-        if s["github_ok"]:
-            github_line = "GitHub: ✓ Ready"
-        elif self.cfg.get("github", {}).get("enabled"):
-            github_line = "GitHub: ⚠ Needs login"
-        else:
-            github_line = "GitHub: Off"
-        if s.get("pagerduty_ok"):
-            pd_line = "PagerDuty: ✓ Ready"
-            if self.pd_status.get("on_call"):
-                pd_line += " · on-call"
-        elif self.cfg.get("pagerduty", {}).get("enabled"):
-            pd_line = "PagerDuty: ⚠ Needs token"
-        else:
-            pd_line = "PagerDuty: Off"
-
-        parent = MenuItem("Status", callback=self._recheck_deps)
-        parent.add(MenuItem(jira_line, callback=None))
-        parent.add(MenuItem(github_line, callback=None))
-        parent.add(MenuItem(pd_line, callback=None))
+            gh = s.get("gh") or {}
+            if self.cfg.get("github", {}).get("enabled") and gh and not gh.get("installed"):
+                gh_needs = "Needs gh CLI"
+            else:
+                gh_needs = "Needs login (gh auth login)"
+            parent.add(MenuItem(self._source_line(
+                "Jira", "jira", s["jira_ok"], s["jira"]["enabled"],
+                "Needs setup"), callback=None))
+            parent.add(MenuItem(self._source_line(
+                "GitHub", "github", s["github_ok"],
+                self.cfg.get("github", {}).get("enabled"), gh_needs),
+                callback=None))
+            parent.add(MenuItem(self._source_line(
+                "PagerDuty", "pagerduty", s.get("pagerduty_ok"),
+                self.cfg.get("pagerduty", {}).get("enabled"), "Needs token",
+                " · on-call" if self.pd_status.get("on_call") else ""),
+                callback=None))
+        for problem in self.cfg_problems[:2]:
+            parent.add(MenuItem(f"Config: ⚠ {problem}"[:90], callback=None))
         parent.add(MenuItem.sep())
         parent.add(MenuItem("Re-check now", callback=self._recheck_deps))
+        parent.add(MenuItem("View log", callback=self._open_log))
         return parent
+
+    def _open_log(self, _):
+        self.backend.open_url(str(cfg_mod.LOG_FILE))
 
     def _update_menuitem(self):
         """Update ▸ submenu when a newer release exists; else a plain action."""
         info = self.update_info
         if info.get("available"):
-            parent = MenuItem(f"Update available: {info['latest']} ▸")
-            parent.add(MenuItem("Download & Install",
+            parent = MenuItem(f"Update available: {info['latest']}")
+            parent.add(MenuItem(updater_mod.download_action_label(),
                                 callback=self._download_update))
             parent.add(MenuItem("Release notes",
                                 callback=self._open_release_page))
@@ -561,20 +766,29 @@ class NotifierApp:
         return MenuItem("Check for updates", callback=self._check_updates_now)
 
     def _recheck_deps(self, _):
-        # Run the (network-bound) check on a worker thread so the tray does
-        # not freeze; apply the result on the main thread.
+        """Menu "Check dependencies" / Status ▸ "Re-check now".
+
+        Re-reads config.json first: the documented setup flow is "fill in the
+        file, save, click Check dependencies", which only works if the check
+        sees the file as it is *now* rather than the copy loaded at startup.
+        Runs the (network-bound) gh check on a worker thread so the tray does
+        not freeze; applies the result on the main thread.
+        """
         def worker():
-            status = deps_mod.check_dependencies(self.cfg)
+            cfg = cfg_mod.ensure_config()
+            status = deps_mod.check_dependencies(cfg)
 
             def apply(_):
+                self._apply_cfg(cfg)
                 self.dep_status = status
+                self._refresh_title()
                 self._build_menu()
                 if status["problems"]:
                     self._post_notification(
                         title="Dev Notifier — dependency check",
                         subtitle="Issues found",
                         message="; ".join(status["problems"])[:200],
-                        data={}, sound=False,
+                        data={"url": str(cfg_mod.config_path())}, sound=False,
                     )
                 else:
                     ready = [name for name, key in (("Jira", "jira_ok"),
@@ -597,9 +811,20 @@ class NotifierApp:
         if self.backend.login_item_enabled():
             ok = self.backend.disable_login_item()
             _log(f"login item disabled ok={ok}")
+            if not ok:
+                self._post_notification(
+                    title="Dev Notifier", subtitle="Couldn't turn off Start at login",
+                    message="See the log (Status ▸ View log) for details.",
+                    data={}, sound=False)
         else:
-            ok = self.backend.enable_login_item()
-            _log(f"login item enabled ok={ok}")
+            reason = self.backend.login_item_blocked_reason()
+            ok = False if reason else self.backend.enable_login_item()
+            _log(f"login item enabled ok={ok}" + (f" ({reason})" if reason else ""))
+            if not ok:
+                self._post_notification(
+                    title="Dev Notifier", subtitle="Couldn't turn on Start at login",
+                    message=reason or "See the log (Status ▸ View log) for details.",
+                    data={}, sound=False)
         self._build_menu()
 
     def _theme_submenu(self):
@@ -622,7 +847,11 @@ class NotifierApp:
     def _set_theme(self, sender):
         name = getattr(sender, "theme_name", DEFAULT_THEME)
         self.cfg["theme"] = name
-        _save_config(self.cfg)
+        # Patch just the theme key on disk: never write the whole in-memory
+        # dict, which may be the runtime defaults (first run / corrupt file)
+        # and would replace the user's real settings with placeholders.
+        if not cfg_mod.save_config_patch({"theme": name}):
+            _log("WARN: theme not saved (config.json unreadable)")
         # If a check is in flight, keep showing the (themed) spinner variant.
         icon = _theme_checking_icon(name) if self._checking else None
         if not icon:
@@ -630,9 +859,10 @@ class NotifierApp:
         if icon:
             self.icon = icon
             self.backend.set_icon(icon)
+            self._base_title = ""
         else:
-            self.title = "\U0001f514"
-            self.backend.set_title(self.title)
+            self._base_title = "\U0001f514"
+        self._refresh_title()
         self._build_menu()
         _log(f"theme changed to {name}")
 
@@ -712,6 +942,22 @@ class NotifierApp:
         def worker():
             try:
                 self._poll_once(manual)
+            except Exception as e:  # noqa: BLE001
+                # Never let a worker die silently: log it and clear the
+                # "Checking…" UI state, otherwise "Check now" stays greyed out
+                # with the spinner icon until the app is relaunched.
+                _log(f"ERROR poll worker: {type(e).__name__}: {e}")
+                msg = f"{type(e).__name__}: {e}"[:200]
+
+                def recover(_):
+                    self.poll_status = {"at": time.time(), "errors": {"poll": msg}}
+                    self._refresh_title()
+                    if self._checking:
+                        self._exit_checking()
+                    else:
+                        self._build_menu()
+
+                self._run_on_main(recover)
             finally:
                 self._polling = False
 
@@ -725,19 +971,25 @@ class NotifierApp:
             _log("WARN: no usable source; " + "; ".join(dep_status["problems"]))
 
             def apply_unusable(_):
-                self.cfg = cfg
+                self._apply_cfg(cfg)
                 self.dep_status = dep_status
                 if manual and self._checking:
                     self._exit_checking()  # restores icon + rebuilds menu
                 else:
                     self._build_menu()
+                # Tell the user once per distinct problem set (not every 5
+                # minutes), and always on a manual "Check now" so a click never
+                # ends in silence. The "Open" button opens the config file.
+                key = tuple(dep_status.get("problems") or [])
+                if manual or key != self._last_unusable_key:
+                    self._last_unusable_key = key
                     self._post_notification(
                         title="Dev Notifier",
                         subtitle="Nothing to check",
                         message=(dep_status["problems"][0]
                                  if dep_status["problems"]
                                  else "Configure Jira/GitHub/PagerDuty first."),
-                        data={}, sound=False,
+                        data={"url": str(cfg_mod.config_path())}, sound=False,
                     )
 
             self._run_on_main(apply_unusable)
@@ -761,8 +1013,12 @@ class NotifierApp:
             err_msg = f"Could not fetch updates: {e}"[:200]
 
             def apply_error(_):
+                self.poll_status = {"at": time.time(), "errors": {"poll": err_msg}}
+                self._refresh_title()
                 if manual and self._checking:
                     self._exit_checking()
+                else:
+                    self._build_menu()
                 if manual:
                     self._post_notification(
                         title="Dev Notifier",
@@ -776,48 +1032,57 @@ class NotifierApp:
 
         # Apply results (notifications, state, menu) on the main thread.
         def apply_results(_):
-            self.cfg = cfg
+            self._apply_cfg(cfg)
             self.dep_status = dep_status
             if extra.get("pagerduty"):
                 self.pd_status = extra["pagerduty"]
+            errors = dict(extra.get("errors") or {})
+            self.poll_status = {"at": time.time(), "errors": errors}
             seen = self.state.setdefault("seen", {})
-            new_count = 0
+            fresh = []  # new, non-quiet items in arrival order
             for _phase, items in phases:
                 for it in items:
                     fp = it["fp"]
                     if fp in seen:
                         continue
-                    # ``quiet`` items (and passing CI) are remembered so they
-                    # never notify later, but are not surfaced now.
-                    if it.get("quiet") or (
-                            it.get("ci_only") and it.get("ci_rollup") == "pass"):
-                        seen[fp] = time.time()
+                    seen[fp] = time.time()
+                    # ``quiet`` items are remembered so they never notify
+                    # later, but are not surfaced now (e.g. CI states the user
+                    # did not opt into via ``github.ci_notify``).
+                    if it.get("quiet"):
                         continue
-                    url = it.get("url", "")
-                    # Notify only; the URL opens when the user clicks the
-                    # notification (or a Recent entry). No auto-open.
-                    self._notify(it)
+                    fresh.append(it)
                     self._recent_counter += 1
                     self.recent.insert(0, {
                         "id": self._recent_counter,
                         "label": f"{it['subtitle']} — {it['message']}"[:80],
-                        "url": url,
+                        "url": it.get("url", ""),
                     })
-                    seen[fp] = time.time()
-                    new_count += 1
+            new_count = len(fresh)
+            self._deliver(fresh)
             self.recent = self.recent[:RECENT_KEEP_LIMIT]
             self.state["recent"] = self.recent
             self.state["recent_counter"] = self._recent_counter
-            # Advance the poll cursor only after a successful fetch so the next
-            # window starts where this one began (no gap, no missed updates).
-            self.state["last_poll"] = poll_started
+            # Advance the poll cursor only when every enabled source fetched
+            # successfully. A source that failed (401, timeout, VPN not up yet
+            # after wake) keeps the window anchored at the previous poll, so
+            # the events from the failed interval are fetched next time instead
+            # of being lost for good. Fingerprints prevent re-notification of
+            # anything the successful sources already delivered.
+            if errors:
+                _log("WARN: poll cursor not advanced; failed: "
+                     + "; ".join(f"{s}: {t}" for s, t in errors.items()))
+            else:
+                self.state["last_poll"] = poll_started
             _save_state(self.state, cfg)
+            self._refresh_title()
             if manual and self._checking:
                 self._exit_checking()  # restores icon + rebuilds menu
             else:
                 self._build_menu()
             _log(f"=== poll done: {new_count} new ===")
-            if manual and new_count == 0:
+            self._report_errors(errors, manual)
+            if manual and new_count == 0 and not errors:
                 self._post_notification(
                     title="Dev Notifier",
                     subtitle="Checked — no new items",
@@ -826,6 +1091,59 @@ class NotifierApp:
                 )
 
         self._run_on_main(apply_results)
+
+    def _report_errors(self, errors: dict, manual: bool) -> None:
+        """Tell the user about failing sources — once per distinct failure set
+        on the timer path (not every 5 minutes), always on a manual check."""
+        if not errors:
+            if self._notified_errors:
+                _log("poll recovered: all sources OK")
+            self._notified_errors = None
+            return
+        key = tuple(sorted(errors.items()))
+        if not manual and key == self._notified_errors:
+            return
+        self._notified_errors = key
+        names = ", ".join(sorted(errors))
+        detail = "; ".join(f"{s}: {t}" for s, t in sorted(errors.items()))
+        self._post_notification(
+            title="Dev Notifier — check problems",
+            subtitle=f"{names} failed",
+            message=detail[:200],
+            data={}, sound=False,
+        )
+
+    def _deliver(self, fresh: list) -> None:
+        """Post notifications for new items, with pause + burst protection.
+
+        - Paused: nothing is posted (items are still in Recent / marked seen).
+        - Up to ``MAX_NOTIFICATIONS_PER_POLL`` items: one notification each.
+        - More than that: a single digest with per-source counts, so a first
+          launch or a return from a weekend offline does not fire dozens of
+          sounded pop-ups in a row.
+        """
+        if not fresh:
+            return
+        if self._is_paused():
+            _log(f"paused: {len(fresh)} notification(s) suppressed")
+            return
+        if len(fresh) <= MAX_NOTIFICATIONS_PER_POLL:
+            for it in fresh:
+                self._notify(it)
+            return
+        counts = {}
+        for it in fresh:
+            counts[it.get("title", "?")] = counts.get(it.get("title", "?"), 0) + 1
+        breakdown = " · ".join(f"{k} {v}" for k, v in counts.items())
+        for it in fresh:
+            _log(f"DIGEST [{it['title']}] {it['subtitle']} | {it['message']}"
+                 f" -> {it.get('url', '')}")
+        self._post_notification(
+            title="Dev Notifier",
+            subtitle=f"{len(fresh)} new updates",
+            message=f"{breakdown}. See Recent in the menu.",
+            data={}, sound=any(it.get("sound", True) for it in fresh),
+        )
 
     def _notify(self, it: dict):
         url = it.get("url", "")

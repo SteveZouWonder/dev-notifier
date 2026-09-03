@@ -421,9 +421,10 @@ def test_download_and_open_no_dmg_url(updater_mod):
     assert "No installer asset" in result["error"]
 
 
-def test_download_and_open_success_no_checksum(updater_mod, monkeypatch, temp_home):
-    # macOS flavour: the DMG is opened via `open` (subprocess). Pin the platform
-    # so _open_installer takes the macOS branch on any CI runner.
+def test_download_and_open_no_checksum_file_is_rejected(updater_mod, monkeypatch, temp_home):
+    """Verification is mandatory: with no SHA256SUMS.txt on the release the
+    download is discarded and never opened (the app is not code-signed, so the
+    checksum is the only integrity check)."""
     monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
     payload = b"dmg-bytes"
     monkeypatch.setattr(updater_mod.urllib.request, "urlopen",
@@ -441,11 +442,49 @@ def test_download_and_open_success_no_checksum(updater_mod, monkeypatch, temp_ho
     logs = []
     result = updater_mod.download_and_open(info, log=logs.append)
 
-    assert result["ok"] is True
-    assert result["path"].endswith("DevNotifier-1.4.0.dmg")
-    # The DMG is opened after a successful download.
-    assert opened["args"][0] == "open"
+    assert result["ok"] is False
+    assert "Could not verify" in result["error"]
+    assert "checksum file not published" in result["error"]
+    assert "Releases page" in result["error"]
+    assert opened == {}
+    assert not (updater_mod.CACHE_DIR / "DevNotifier-1.4.0.dmg").exists()
     assert any("downloaded" in m for m in logs)
+
+
+def test_download_and_open_asset_missing_from_sums_is_rejected(updater_mod, monkeypatch,
+                                                               temp_home):
+    monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
+    payload = b"dmg-bytes"
+    monkeypatch.setattr(updater_mod.urllib.request, "urlopen",
+                        lambda *a, **k: _FakeDownloadResp([payload]))
+    monkeypatch.setattr(updater_mod, "_http_get",
+                        lambda url, accept="": b"deadbeef  ./other-file.dmg\n")
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    info = {"dmg_url": "https://x/DevNotifier-1.4.0.dmg",
+            "dmg_name": "DevNotifier-1.4.0.dmg",
+            "sha256_url": "https://x/SHA256SUMS.txt"}
+    result = updater_mod.download_and_open(info)
+    assert result["ok"] is False
+    assert "not listed in SHA256SUMS.txt" in result["error"]
+
+
+def test_install_instructions_per_platform(updater_mod):
+    sub, msg = updater_mod.install_instructions("darwin")
+    assert sub == "Disk image opened"
+    assert "drag the new app" in msg and "xattr" in msg
+    sub, msg = updater_mod.install_instructions("win32")
+    assert sub == "Installer opened"
+    assert "relaunches" in msg
+    # Default = current platform; just make sure it returns a pair.
+    assert len(updater_mod.install_instructions()) == 2
+
+
+def test_download_action_label_per_platform(updater_mod):
+    assert updater_mod.download_action_label("win32") == "Download & Install"
+    assert updater_mod.download_action_label("darwin") == "Download update…"
+    assert updater_mod.download_action_label() in ("Download & Install",
+                                                  "Download update…")
 
 
 def test_download_and_open_checksum_match(updater_mod, monkeypatch, temp_home):
@@ -490,7 +529,9 @@ def test_download_and_open_checksum_mismatch_discards(updater_mod, monkeypatch, 
     assert not (updater_mod.CACHE_DIR / "DevNotifier-1.4.0.dmg").exists()
 
 
-def test_download_and_open_checksum_fetch_error_is_best_effort(updater_mod, monkeypatch, temp_home):
+def test_download_and_open_checksum_fetch_error_rejects(updater_mod, monkeypatch, temp_home):
+    """If the checksum file cannot be fetched the download is *not* opened
+    unverified; the user is told why and pointed at the Releases page."""
     monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
     import urllib.error
     payload = b"bytes"
@@ -502,15 +543,18 @@ def test_download_and_open_checksum_fetch_error_is_best_effort(updater_mod, monk
 
     monkeypatch.setattr(updater_mod, "_http_get", boom)
     import subprocess
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    called = {"run": False}
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: called.__setitem__("run", True))
 
     info = {"dmg_url": "https://x/DevNotifier-1.4.0.dmg",
             "dmg_name": "DevNotifier-1.4.0.dmg",
             "sha256_url": "https://x/SHA256SUMS.txt"}
     logs = []
     result = updater_mod.download_and_open(info, log=logs.append)
-    # Checksum unavailable -> proceed anyway (best effort) and succeed.
-    assert result["ok"] is True
+    assert result["ok"] is False
+    assert "could not fetch checksums" in result["error"]
+    assert called["run"] is False
     assert any("could not fetch checksums" in m for m in logs)
 
 
@@ -580,10 +624,13 @@ def test_download_and_open_windows_installer(updater_mod, monkeypatch, temp_home
     opened = {}
     monkeypatch.setattr(updater_mod.os, "startfile",
                         lambda p: opened.setdefault("path", p), raising=False)
+    monkeypatch.setattr(
+        updater_mod, "_http_get",
+        lambda url, accept="": f"{_sha256(payload)}  DevNotifier-1.4.0-setup.exe\n".encode())
 
     info = {"installer_url": "https://x/DevNotifier-1.4.0-setup.exe",
             "installer_name": "DevNotifier-1.4.0-setup.exe",
-            "sha256_url": None}
+            "sha256_url": "https://x/SHA256SUMS.txt"}
     result = updater_mod.download_and_open(info)
 
     assert result["ok"] is True

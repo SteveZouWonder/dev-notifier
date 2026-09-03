@@ -44,27 +44,31 @@ Dev Notifier — first launch
 ================================
 
 This is a free, open-source, unsigned build (no Apple Developer certificate),
-so macOS may warn "cannot verify developer" or "is damaged" on first launch.
-That is expected.
+so macOS blocks the first launch with "is damaged and can't be opened" or
+"cannot verify developer". That is expected. (Apple Silicon build.)
 
-To open (either option):
+To open:
 
-Option A (recommended):
-  1. Drag DevNotifier.app into your Applications folder.
-  2. Right-click DevNotifier in Applications -> Open.
-  3. Click "Open" in the dialog. It launches normally afterwards.
+  1. Drag DevNotifier.app into your Applications folder (do not run it from
+     this window — "Start at login" needs it in Applications).
+  2. Open Terminal and run:
+       xattr -dr com.apple.quarantine /Applications/DevNotifier.app
+  3. Double-click DevNotifier in Applications. The first launch can take
+     10-20 seconds while macOS scans it.
 
-Option B (if it says "is damaged and can't be opened"):
-  Open Terminal and run:
-    xattr -dr com.apple.quarantine /Applications/DevNotifier.app
-  Then double-click to open.
+  Without the terminal: try to open it, then System Settings -> Privacy &
+  Security -> "Open Anyway". (On macOS 14 and earlier, right-click -> Open ->
+  Open also works.) You will need to repeat this after each update.
 
 First run creates a config file at:
     ~/.config/dev-notifier/config.json
-Fill in your Jira URL / email / API token there. GitHub uses the `gh` CLI
-(https://cli.github.com) — run `gh auth login` once.
+Fill in your Jira URL / email / API token there, save, then click "Check
+dependencies" in the app menu. GitHub uses the `gh` CLI
+(https://cli.github.com) — run `gh auth login` once. PagerDuty is optional
+(set "enabled": true and paste a User API token).
 
-The app lives in the menu bar (bell icon). Allow notifications when prompted.
+The app lives in the menu bar (lightning-bolt icon). Allow notifications when
+prompted. Full guide: https://github.com/SteveZouWonder/dev-notifier/blob/main/TUTORIAL.md
 EOF
 
 echo "==> Build DMG"

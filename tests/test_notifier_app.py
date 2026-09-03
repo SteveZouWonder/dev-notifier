@@ -182,11 +182,12 @@ def test_log_swallows_oserror(app_mod, monkeypatch):
 
 
 def test_save_config_swallows_oserror(app_mod, monkeypatch, sample_cfg):
-    class BadPath:
-        def write_text(self, *a, **k):
-            raise OSError("readonly")
+    from pathlib import Path
 
-    monkeypatch.setattr(app_mod.cfg_mod, "config_path", lambda: BadPath())
+    def boom(self, *a, **k):
+        raise OSError("readonly")
+
+    monkeypatch.setattr(Path, "write_text", boom)
     app_mod._save_config(sample_cfg)  # no exception
 
 
@@ -847,12 +848,15 @@ def test_poll_once_passes_last_poll_as_since(sync_app, app_mod, monkeypatch):
     assert captured["since_ts"] == 12345.0
 
 
-def test_poll_once_skips_passing_ci(sync_app, app_mod, monkeypatch):
+def test_poll_once_skips_quiet_passing_ci(sync_app, app_mod, monkeypatch):
     monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
+    # poll.py flags roll-ups the user did not opt into (default: pass/pending)
+    # as ``quiet``; the app honours that flag rather than hard-coding "pass".
     items = [{"fp": "ci:1", "title": "GitHub CI", "subtitle": "s",
-              "message": "m", "url": "u", "ci_only": True, "ci_rollup": "pass"}]
+              "message": "m", "url": "u", "ci_only": True, "ci_rollup": "pass",
+              "quiet": True}]
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
                         lambda cfg, log=None, since_ts=None, extra=None: [("ci", items)])
     sync_app.state = {"seen": {}}
@@ -861,6 +865,24 @@ def test_poll_once_skips_passing_ci(sync_app, app_mod, monkeypatch):
     # Passing CI is marked seen but not surfaced as a recent item.
     assert sync_app.recent == []
     assert "ci:1" in sync_app.state["seen"]
+
+
+def test_poll_once_honours_ci_notify_pass(sync_app, app_mod, monkeypatch):
+    """``github.ci_notify: ["pass"]`` used to be silently ignored because the
+    app force-quieted every passing roll-up. Now a non-quiet pass notifies."""
+    sync_app.backend.notifications.clear()
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+    items = [{"fp": "ci:1", "title": "GitHub CI", "subtitle": "s",
+              "message": "✅ CI pass", "url": "u", "ci_only": True,
+              "ci_rollup": "pass"}]
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        lambda cfg, log=None, since_ts=None, extra=None: [("ci", items)])
+    sync_app.state = {"seen": {}}
+    sync_app.recent = []
+    sync_app._poll_once(manual=False)
+    assert [n["message"] for n in sync_app.backend.notifications] == ["✅ CI pass"]
 
 
 def test_poll_once_quiet_items_marked_seen_without_notifying(
@@ -1291,3 +1313,588 @@ def test_setup_messages_mention_pagerduty(sync_app, app_mod, monkeypatch):
                         lambda cfg: _full_dep_status(False, []))
     sync_app._poll_once(manual=False)
     assert "Jira/GitHub/PagerDuty" in sync_app.backend.notifications[-1]["message"]
+
+
+# ---------------------------------------------------------------------------
+# Silent failures made visible: per-source errors, cursor, badge, Status lines
+# ---------------------------------------------------------------------------
+
+def _collect_with(items_by_phase, errors=None, pd=None):
+    """Build a fake collect_all that fills ``extra`` like the real one."""
+    def fake(cfg, log=None, since_ts=None, extra=None):
+        if extra is not None:
+            extra["errors"] = dict(errors or {})
+            if pd is not None:
+                extra["pagerduty"] = pd
+        return list(items_by_phase)
+    return fake
+
+
+def _ready(sync_app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+
+
+def test_poll_errors_hold_cursor_and_surface(sync_app, app_mod, monkeypatch):
+    """A failing source must not advance ``last_poll`` (the events in that
+    window would be lost) and must be reported: badge, Status, notification."""
+    sync_app.backend.notifications.clear()
+    _ready(sync_app, app_mod, monkeypatch)
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all", _collect_with(
+        [("jira", []), ("github", [{"fp": "g1", "title": "GitHub",
+                                    "subtitle": "s", "message": "m", "url": "u"}])],
+        errors={"jira": "HTTP 401 unauthorized — check the API token"}))
+    sync_app.state = {"seen": {}, "last_poll": 100.0}
+    sync_app._poll_once(manual=False)
+
+    # Cursor unchanged; the GitHub item was still delivered and marked seen.
+    assert sync_app.state["last_poll"] == 100.0
+    assert "g1" in sync_app.state["seen"]
+    assert sync_app.poll_status["errors"] == {"jira": "HTTP 401 unauthorized — check the API token"}
+    # ⚠ badge next to the tray icon.
+    assert app_mod.WARNING_BADGE in (sync_app.backend.title or "")
+    # The user is told which source failed and why.
+    problems = [n for n in sync_app.backend.notifications
+                if "check problems" in n["title"]]
+    assert len(problems) == 1
+    assert problems[0]["subtitle"] == "jira failed"
+    assert "HTTP 401" in problems[0]["message"]
+    # Status ▸ shows the live error instead of a misleading "✓ Ready".
+    status = next(i for i in sync_app.menu if i.title == "Status")
+    titles = [c.title for c in status.children]
+    assert any(t.startswith("Jira: ⚠ HTTP 401") for t in titles)
+    assert any(t.startswith("Last check:") and "jira failed" in t for t in titles)
+    assert "GitHub: ✓ Ready" in titles
+
+
+def test_poll_errors_not_renotified_every_tick(sync_app, app_mod, monkeypatch):
+    sync_app.backend.notifications.clear()
+    _ready(sync_app, app_mod, monkeypatch)
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        _collect_with([("jira", [])], errors={"jira": "timed out"}))
+    sync_app.state = {"seen": {}}
+    sync_app._poll_once(manual=False)
+    sync_app._poll_once(manual=False)
+    problems = [n for n in sync_app.backend.notifications
+                if "check problems" in n["title"]]
+    assert len(problems) == 1  # same failure set -> told once
+    # A manual check always reports it again.
+    sync_app._poll_once(manual=True)
+    problems = [n for n in sync_app.backend.notifications
+                if "check problems" in n["title"]]
+    assert len(problems) == 2
+    # And a manual check with errors does NOT claim "all caught up".
+    assert not any("no new items" in n["subtitle"]
+                   for n in sync_app.backend.notifications)
+    # A changed failure set is reported again on the timer path.
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        _collect_with([("jira", [])],
+                                      errors={"jira": "timed out", "pagerduty": "HTTP 401"}))
+    sync_app._poll_once(manual=False)
+    problems = [n for n in sync_app.backend.notifications
+                if "check problems" in n["title"]]
+    assert len(problems) == 3
+    assert problems[-1]["subtitle"] == "jira, pagerduty failed"
+
+
+def test_poll_recovery_clears_badge_and_advances_cursor(sync_app, app_mod,
+                                                        monkeypatch, tmp_path):
+    _ready(sync_app, app_mod, monkeypatch)
+    logs = []
+    monkeypatch.setattr(app_mod, "_log", logs.append)
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        _collect_with([("jira", [])], errors={"jira": "timed out"}))
+    sync_app.state = {"seen": {}}
+    sync_app._poll_once(manual=False)
+    assert app_mod.WARNING_BADGE in (sync_app.backend.title or "")
+    assert "last_poll" not in sync_app.state
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all", _collect_with([("jira", [])]))
+    sync_app._poll_once(manual=False)
+    assert sync_app.poll_status["errors"] == {}
+    assert sync_app.backend.title is None
+    assert isinstance(sync_app.state["last_poll"], float)
+    assert any("poll recovered" in m for m in logs)
+    status = next(i for i in sync_app.menu if i.title == "Status")
+    assert any(t.startswith("Last check: just now ✓") for t in
+               (c.title for c in status.children))
+
+
+def test_status_shows_last_check_before_first_poll(app, app_mod):
+    status = next(i for i in app.menu if i.title == "Status")
+    titles = [c.title for c in status.children]
+    assert "Last check: not yet" in titles
+    assert "View log" in titles
+    # With a persisted cursor from a previous launch:
+    app.state["last_poll"] = time.time() - 120
+    app._build_menu()
+    status = next(i for i in app.menu if i.title == "Status")
+    assert any(t == "Last check: 2 min ago (before this launch)"
+               for t in (c.title for c in status.children))
+
+
+def test_status_github_distinguishes_missing_gh_from_not_logged_in(app):
+    app.dep_status = {"ok": False, "problems": ["x"], "pending": False,
+                      "jira_ok": False, "jira": {"enabled": False},
+                      "github_ok": False,
+                      "gh": {"installed": False, "authed": False}}
+    app.cfg["github"] = {"enabled": True}
+    app._build_menu()
+    status = next(i for i in app.menu if i.title == "Status")
+    titles = [c.title for c in status.children]
+    assert "GitHub: ⚠ Needs gh CLI" in titles
+    app.dep_status["gh"] = {"installed": True, "authed": False}
+    app._build_menu()
+    status = next(i for i in app.menu if i.title == "Status")
+    assert "GitHub: ⚠ Needs login (gh auth login)" in [c.title for c in status.children]
+
+
+def test_status_shows_config_problems(app, app_mod):
+    app.cfg_problems = ["unknown setting 'jira.supress_self'", "b", "c"]
+    app._build_menu()
+    status = next(i for i in app.menu if i.title == "Status")
+    titles = [c.title for c in status.children]
+    assert "Config: ⚠ unknown setting 'jira.supress_self'" in titles
+    assert "Config: ⚠ b" in titles
+    assert "Config: ⚠ c" not in titles  # at most two lines
+    assert app._has_problems() is True
+    app._refresh_title()
+    assert app_mod.WARNING_BADGE in app.backend.title
+
+
+def test_open_log_opens_log_file(app, app_mod):
+    app._open_log(None)
+    assert app.backend.opened_urls == [str(app_mod.cfg_mod.LOG_FILE)]
+
+
+def test_ago_labels(app_mod):
+    now = time.time()
+    assert app_mod._ago(None) == "never"
+    assert app_mod._ago(now) == "just now"
+    assert app_mod._ago(now - 300) == "5 min ago"
+    assert app_mod._ago(now - 7200) == "2 h ago"
+    assert app_mod._ago(now - 3 * 86400) == "3 d ago"
+
+
+def test_collect_all_error_sets_poll_status(sync_app, app_mod, monkeypatch):
+    _ready(sync_app, app_mod, monkeypatch)
+
+    def boom(cfg, log=None, since_ts=None, extra=None):
+        raise RuntimeError("collect failed")
+
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all", boom)
+    sync_app._poll_once(manual=False)
+    assert "collect failed" in sync_app.poll_status["errors"]["poll"]
+    assert app_mod.WARNING_BADGE in sync_app.backend.title
+
+
+def test_worker_exception_recovers_ui_state(app, app_mod, monkeypatch):
+    """An unexpected exception inside the poll worker must clear the
+    "Checking…" state instead of leaving the spinner + greyed item forever."""
+    class SyncThread:
+        def __init__(self, target=None, daemon=None, **k):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(app_mod.threading, "Thread", SyncThread)
+    monkeypatch.setattr(app_mod, "_theme_checking_icon", lambda name: None)
+
+    def boom(manual):
+        raise KeyError("bucket")
+
+    monkeypatch.setattr(app, "_poll_once", boom)
+    app.check_now(None)
+    assert app._checking is False
+    assert app._polling is False
+    assert "KeyError" in app.poll_status["errors"]["poll"]
+    titles = [i.title for i in app.menu]
+    assert "Check now" in titles and "Checking…" not in titles
+    # Non-manual path rebuilds the menu too.
+    app.on_tick(None, manual=False)
+    assert app._polling is False
+
+
+# ---------------------------------------------------------------------------
+# Unconfigured: nag once per problem set; manual check is never silent
+# ---------------------------------------------------------------------------
+
+def test_unusable_nags_once_on_timer_and_always_on_manual(sync_app, app_mod,
+                                                         monkeypatch):
+    sync_app.backend.notifications.clear()
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(False, ["configure first"]))
+    sync_app._poll_once(manual=False)
+    sync_app._poll_once(manual=False)
+    nags = [n for n in sync_app.backend.notifications
+            if n["subtitle"] == "Nothing to check"]
+    assert len(nags) == 1
+    # Clicking "Open" on the nag opens the config file.
+    assert nags[0]["data"]["url"] == str(app_mod.cfg_mod.config_path())
+    assert nags[0]["action_button"] == "Open"
+    # Manual check while unconfigured is never silent.
+    sync_app._poll_once(manual=True)
+    nags = [n for n in sync_app.backend.notifications
+            if n["subtitle"] == "Nothing to check"]
+    assert len(nags) == 2
+    # A different problem set nags again on the timer path.
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(False, ["something else"]))
+    sync_app._poll_once(manual=False)
+    nags = [n for n in sync_app.backend.notifications
+            if n["subtitle"] == "Nothing to check"]
+    assert len(nags) == 3
+
+
+def test_setup_needed_notification_opens_config(app, app_mod):
+    app.backend.notifications.clear()
+    app.dep_status = {"ok": False, "problems": ["fix this"]}
+    app._warn_if_unmet()
+    n = app.backend.notifications[0]
+    assert n["data"]["url"] == str(app_mod.cfg_mod.config_path())
+    assert n["action_button"] == "Open"
+
+
+def test_recheck_deps_reloads_config_from_disk(sync_app, app_mod, monkeypatch):
+    """Fill in the file -> click Check dependencies must see the new values
+    (it used to check the stale in-memory copy loaded at startup)."""
+    on_disk = json.loads(app_mod.cfg_mod.config_path().read_text(encoding="utf-8"))
+    on_disk["jira"].update({"base_url": "https://acme.atlassian.net",
+                            "username": "dev@acme.com", "api_token": "tok"})
+    on_disk["theme"] = "Bell"  # legacy alias -> normalized on reload
+    app_mod._save_config(on_disk)
+    seen_cfg = {}
+
+    def fake_check(cfg):
+        seen_cfg.update(cfg)
+        return _full_dep_status(True, [])
+
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies", fake_check)
+    sync_app._recheck_deps(None)
+    assert seen_cfg["jira"]["api_token"] == "tok"
+    assert sync_app.cfg["jira"]["api_token"] == "tok"
+    assert sync_app.cfg["theme"] == "Yellow"
+    # Problems from the dependency check open the config file too.
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(False, ["boom"]))
+    sync_app.backend.notifications.clear()
+    sync_app._recheck_deps(None)
+    assert sync_app.backend.notifications[0]["data"]["url"] == str(
+        app_mod.cfg_mod.config_path())
+
+
+def test_initial_check_reloads_config(sync_app, app_mod, monkeypatch):
+    on_disk = json.loads(app_mod.cfg_mod.config_path().read_text(encoding="utf-8"))
+    on_disk["theme"] = "Green"
+    app_mod._save_config(on_disk)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+    sync_app._initial_check(None)  # sender None: falls back to the stored timer
+    assert sync_app.cfg["theme"] == "Green"
+    assert sync_app._startup_timer.stopped is True
+
+
+def test_stop_timer_helper(app_mod):
+    class T:
+        stopped = False
+
+        def stop(self):
+            self.stopped = True
+
+    class Bad:
+        def stop(self):
+            raise RuntimeError("no")
+
+    t = T()
+    app_mod._stop_timer(t)
+    assert t.stopped
+    fb = T()
+    app_mod._stop_timer(None, fb)
+    assert fb.stopped
+    app_mod._stop_timer(Bad(), T())  # swallowed; first candidate used
+    app_mod._stop_timer(None, None)  # nothing to stop -> no error
+
+
+def test_apply_cfg_restarts_timer_when_interval_changes(app, app_mod):
+    old_timer = app.timer
+    cfg = dict(app.cfg)
+    cfg["poll"] = {"interval_seconds": 60}
+    app._apply_cfg(cfg)
+    assert old_timer.stopped is True
+    assert app.timer is not old_timer
+    assert app.timer.interval == 60
+    # Same interval -> timer left alone.
+    t = app.timer
+    app._apply_cfg(dict(cfg))
+    assert app.timer is t
+    # Bad / too-small values fall back safely (min 30s / default 300s).
+    assert app_mod.NotifierApp._interval_from({"poll": {"interval_seconds": "x"}}) == 300
+    assert app_mod.NotifierApp._interval_from({"poll": {"interval_seconds": 5}}) == 30
+
+
+def test_apply_cfg_timer_stop_failure_is_swallowed(app):
+    class BadTimer:
+        def stop(self):
+            raise RuntimeError("cannot stop")
+
+    app.timer = BadTimer()
+    cfg = dict(app.cfg)
+    cfg["poll"] = {"interval_seconds": 120}
+    app._apply_cfg(cfg)
+    assert app.timer.interval == 120
+
+
+# ---------------------------------------------------------------------------
+# Config save never clobbers the user's file
+# ---------------------------------------------------------------------------
+
+def test_set_theme_patches_only_theme_key(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: "/tmp/x.png")
+    path = app_mod.cfg_mod.config_path()
+    path.write_text(json.dumps({"_readme": "keep", "jira": {"api_token": "real"},
+                                "theme": "Orange"}), encoding="utf-8")
+
+    class Sender:
+        theme_name = "Green"
+
+    app._set_theme(Sender())
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["theme"] == "Green"
+    assert on_disk["_readme"] == "keep"
+    assert on_disk["jira"] == {"api_token": "real"}
+    assert app.title is None  # icon present -> no emoji fallback
+
+
+def test_set_theme_with_corrupt_config_does_not_overwrite(app, app_mod,
+                                                          monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
+    path = app_mod.cfg_mod.config_path()
+    broken = '{ "jira": { "api_token": "real" '
+    path.write_text(broken, encoding="utf-8")
+    logs = []
+    monkeypatch.setattr(app_mod, "_log", logs.append)
+
+    class Sender:
+        theme_name = "Purple"
+
+    app._set_theme(Sender())
+    assert path.read_text(encoding="utf-8") == broken
+    assert app.cfg["theme"] == "Purple"  # in-memory still switches
+    assert any("theme not saved" in m for m in logs)
+
+
+def test_skip_version_patches_only_update_key(app, app_mod, monkeypatch):
+    path = app_mod.cfg_mod.config_path()
+    path.write_text(json.dumps({"jira": {"api_token": "real"}}), encoding="utf-8")
+    app.update_info = {"available": True, "latest": "9.9.9"}
+    app._skip_this_version(None)
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["update"] == {"skipped_version": "9.9.9"}
+    assert on_disk["jira"] == {"api_token": "real"}
+    # DEFAULT_CONFIG untouched even though cfg was the defaults deep-copy.
+    assert app_mod.cfg_mod.DEFAULT_CONFIG["update"]["skipped_version"] == ""
+
+
+def test_skip_version_with_corrupt_config_logs(app, app_mod, monkeypatch):
+    app_mod.cfg_mod.config_path().write_text("{ nope", encoding="utf-8")
+    logs = []
+    monkeypatch.setattr(app_mod, "_log", logs.append)
+    app.update_info = {"available": True, "latest": "9.9.9"}
+    app._skip_this_version(None)
+    assert any("skipped version not saved" in m for m in logs)
+
+
+# ---------------------------------------------------------------------------
+# Burst protection + pause
+# ---------------------------------------------------------------------------
+
+def _items(n, title="Jira"):
+    return [{"fp": f"{title}:{i}", "title": title, "subtitle": f"s{i}",
+             "message": f"m{i}", "url": f"u{i}"} for i in range(n)]
+
+
+def test_burst_is_folded_into_one_digest(sync_app, app_mod, monkeypatch):
+    sync_app.backend.notifications.clear()
+    _ready(sync_app, app_mod, monkeypatch)
+    many = _items(7) + _items(3, "GitHub")
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        _collect_with([("jira", many[:7]), ("github", many[7:])]))
+    sync_app.state = {"seen": {}}
+    sync_app.recent = []
+    sync_app._poll_once(manual=False)
+    digest = [n for n in sync_app.backend.notifications
+              if n["title"] == "Dev Notifier"]
+    assert len(sync_app.backend.notifications) == 1
+    assert digest[0]["subtitle"] == "10 new updates"
+    assert "Jira 7" in digest[0]["message"] and "GitHub 3" in digest[0]["message"]
+    assert "Recent" in digest[0]["message"]
+    assert digest[0]["sound"] is True
+    # Everything is still in Recent and marked seen.
+    assert len(sync_app.recent) == 10
+    assert len(sync_app.state["seen"]) == 10
+
+
+def test_small_batch_notifies_individually(sync_app, app_mod, monkeypatch):
+    sync_app.backend.notifications.clear()
+    _ready(sync_app, app_mod, monkeypatch)
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        _collect_with([("jira", _items(app_mod.MAX_NOTIFICATIONS_PER_POLL))]))
+    sync_app.state = {"seen": {}}
+    sync_app._poll_once(manual=False)
+    assert len(sync_app.backend.notifications) == app_mod.MAX_NOTIFICATIONS_PER_POLL
+    assert all(n["title"] == "Jira" for n in sync_app.backend.notifications)
+
+
+def test_digest_sound_follows_items(app, app_mod):
+    app.backend.notifications.clear()
+    quiet_burst = [dict(it, sound=False) for it in _items(8)]
+    app._deliver(quiet_burst)
+    assert app.backend.notifications[0]["sound"] is False
+    app._deliver([])  # nothing -> nothing
+
+
+def test_pause_suppresses_notifications_but_keeps_recent(sync_app, app_mod,
+                                                         monkeypatch):
+    sync_app.backend.notifications.clear()
+    _ready(sync_app, app_mod, monkeypatch)
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        _collect_with([("jira", _items(2))]))
+
+    class Sender:
+        pause_seconds = 3600
+
+    sync_app._pause_notifications(Sender())
+    assert sync_app._is_paused() is True
+    assert app_mod.PAUSED_BADGE in sync_app.backend.title
+    assert sync_app.state["paused_until"] > time.time()
+    titles = [i.title for i in sync_app.menu]
+    assert any(t.startswith("Resume notifications (paused until ") for t in titles)
+    assert "Pause notifications" not in titles
+
+    sync_app.state["seen"] = {}
+    sync_app.recent = []
+    sync_app._poll_once(manual=False)
+    assert sync_app.backend.notifications == []  # suppressed
+    assert len(sync_app.recent) == 2                # but recorded
+    assert len(sync_app.state["seen"]) == 2
+
+    sync_app._resume_notifications(None)
+    assert sync_app._is_paused() is False
+    assert "paused_until" not in sync_app.state
+    assert sync_app.backend.title is None
+    pause = next(i for i in sync_app.menu if i.title == "Pause notifications")
+    assert [c.title for c in pause.children] == [l for l, _ in app_mod.PAUSE_OPTIONS]
+
+
+def test_pause_indefinitely_and_expiry(app, app_mod):
+    class Sender:
+        pause_seconds = None
+
+    app._pause_notifications(Sender())
+    assert app._paused_until == app_mod.PAUSED_INDEFINITELY
+    assert app._is_paused() is True
+    assert "Resume notifications (paused)" in [i.title for i in app.menu]
+    # An expired timed pause clears itself.
+    app._paused_until = time.time() - 1
+    app.state["paused_until"] = app._paused_until
+    assert app._is_paused() is False
+    assert "paused_until" not in app.state
+
+
+def test_pause_survives_restart(app_mod, fake_backend, monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
+    app_mod.cfg_mod.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    app_mod.cfg_mod.STATE_FILE.write_text(
+        json.dumps({"seen": {}, "paused_until": app_mod.PAUSED_INDEFINITELY}),
+        encoding="utf-8")
+    instance = app_mod.NotifierApp(backend=fake_backend)
+    assert instance._is_paused() is True
+    assert app_mod.PAUSED_BADGE in fake_backend.title
+
+
+# ---------------------------------------------------------------------------
+# Start at login feedback + repair; update messaging
+# ---------------------------------------------------------------------------
+
+def test_toggle_login_item_blocked_reports_reason(app):
+    app.backend.notifications.clear()
+    app.backend.login_blocked = "Dev Notifier is running from the disk image."
+    app._toggle_login_item(None)
+    assert app.backend.login_item_enabled() is False
+    n = app.backend.notifications[0]
+    assert "Couldn't turn on" in n["subtitle"]
+    assert "disk image" in n["message"]
+
+
+def test_toggle_login_item_failures_notify(app):
+    app.backend.notifications.clear()
+    app.backend.enable_ok = False
+    app._toggle_login_item(None)
+    assert "Couldn't turn on" in app.backend.notifications[-1]["subtitle"]
+    app.backend.enable_ok = True
+    app._toggle_login_item(None)  # enabled
+    app.backend.disable_ok = False
+    app._toggle_login_item(None)
+    assert "Couldn't turn off" in app.backend.notifications[-1]["subtitle"]
+
+
+def test_login_item_repaired_on_startup_is_logged(app_mod, fake_backend,
+                                                  monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
+    logs = []
+    monkeypatch.setattr(app_mod, "_log", logs.append)
+    fake_backend.repaired = True
+    app_mod.NotifierApp(backend=fake_backend)
+    assert any("re-pointed" in m for m in logs)
+
+
+def test_login_item_repair_failure_is_swallowed(app_mod, fake_backend,
+                                                monkeypatch):
+    monkeypatch.setattr(app_mod, "_theme_icon", lambda name: None)
+    logs = []
+    monkeypatch.setattr(app_mod, "_log", logs.append)
+
+    def boom():
+        raise RuntimeError("plist locked")
+
+    fake_backend.repair_login_item = boom
+    app_mod.NotifierApp(backend=fake_backend)  # must not raise
+    assert any("repair failed" in m for m in logs)
+
+
+def test_download_update_success_uses_platform_wording(sync_app, app_mod,
+                                                       monkeypatch):
+    sync_app.backend.notifications.clear()
+    sync_app.update_info = {"latest": "2.0.0", "html_url": "u"}
+    monkeypatch.setattr(app_mod.updater_mod, "download_and_open",
+                        lambda info, log=None: {"ok": True, "path": "/x", "error": None})
+    monkeypatch.setattr(app_mod.updater_mod.sys, "platform", "darwin")
+    sync_app._download_update(None)
+    n = sync_app.backend.notifications[-1]
+    assert n["subtitle"] == "Disk image opened"
+    assert "drag the new app" in n["message"]
+
+
+def test_update_menu_label_is_platform_aware(app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod.updater_mod.sys, "platform", "darwin")
+    app.update_info = {"available": True, "latest": "9.0.0"}
+    item = app._update_menuitem()
+    assert item.title == "Update available: 9.0.0"
+    assert item.children[0].title == "Download update…"
+
+
+def test_update_check_error_is_logged_and_shown(sync_app, app_mod, monkeypatch):
+    sync_app.backend.notifications.clear()
+    logs = []
+    monkeypatch.setattr(app_mod, "_log", logs.append)
+    info = {"available": False, "from_source": False,
+            "error": "HTTP Error 403: rate limit exceeded",
+            "current": "1.3.0", "latest": ""}
+    monkeypatch.setattr(app_mod.updater_mod, "check_for_update", lambda cfg: info)
+    sync_app._run_update_check(notify=True, manual=True)
+    assert any("update check failed" in m for m in logs)
+    n = sync_app.backend.notifications[-1]
+    assert n["subtitle"] == "Couldn't check"
+    assert "403" in n["message"]
