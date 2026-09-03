@@ -124,7 +124,7 @@ Click (macOS) or right‑click (Windows) the icon:
 |------|--------------|
 | **Check now** | Check right away instead of waiting for the timer. Tells you if a source failed |
 | **Status ▸** | When the last check ran, and whether Jira / GitHub / PagerDuty are working. A failing source shows its error here (and a ⚠ badge appears next to the icon). Also **Re‑check now** and **View log** |
-| **PagerDuty ▸** | *(when enabled)* On‑call now / next shift, and your open incidents — click one to open it |
+| **PagerDuty ▸** | *(when enabled)* Every escalation level you're currently on — **On‑call now** (level 1), **Backup on‑call (level 2)**, **Fallback on‑call (level 3+)** — each opens its schedule / escalation policy in PagerDuty; your next shift; and your open incidents — click one to open it |
 | **Pause notifications ▸** | Mute pop‑ups for 1 hour / 4 hours / until you resume. Items still go to Recent; a ⏸ badge shows while paused |
 | **Recent** | The last items seen — reopen or remove them |
 | **Clear all recent** | Empty the recent list |
@@ -253,13 +253,14 @@ notification appears.
   [PagerDuty](#pagerduty)) or set `"enabled": false` to turn it back off.
 
 **PagerDuty menu says I'm on‑call but PagerDuty shows someone else**
-- Click the *On‑call now (…)* line — it opens the schedule or escalation
-  policy the app is looking at. If the line says *no end — direct policy
-  target*, you are listed directly on that escalation policy (not via a
-  rotation). By default only **level 1** counts; if you still see this, you are
-  a level‑1 direct target on that policy — ask the policy owner, or check the
-  policy page. To also be told about deeper fallback levels set
-  `"oncall_max_level": 2` (or higher).
+- Open **PagerDuty ▸**: each line is one escalation level you sit on.
+  *On‑call now* is level 1 (what PagerDuty's service page shows as *On call
+  now*); *Backup on‑call (level 2)* and *Fallback on‑call (level N)* mean you
+  are only paged if the people before you don't acknowledge. Click a line to
+  open that schedule / escalation policy in PagerDuty and check. *direct policy
+  target, no end* means you're listed on the policy itself rather than via a
+  rotation. Only level 1 makes the header say **on‑call** (and triggers shift
+  reminders); raise `"oncall_max_level"` if you want level 2+ to count too.
 
 **Too many PagerDuty notifications**
 - Add `"notify_team_incidents": false` under `"pagerduty"` to only hear about
@@ -359,7 +360,7 @@ behaviour:
 | `pagerduty.low_urgency_sound` | `false` | Play a sound for low‑urgency incidents too (they're silent by default) |
 | `pagerduty.oncall_reminders` | `true` | Notify before / at the start / at the end of your on‑call shifts |
 | `pagerduty.oncall_remind_before_minutes` | `[1440, 60]` | How long before a shift to send a heads‑up (minutes; one per entry) |
-| `pagerduty.oncall_max_level` | `1` | Deepest escalation level that counts as "on‑call". PagerDuty lists every level you sit on; by default only level 1 (what PagerDuty's own *On call now* shows) counts. Set `2` or `3` to also be told when you're the fallback; such entries are labelled `· level N` |
+| `pagerduty.oncall_max_level` | `1` | Deepest escalation level that counts as "on‑call" (header, Status line, shift reminders). All levels are always *listed* in PagerDuty ▸ with their own wording; by default only level 1 — what PagerDuty's own *On call now* shows — counts. Set `2` or `3` to also get reminders when you're the backup/fallback |
 | `update.enabled` | `true` | Auto‑check GitHub Releases for a newer version |
 | `update.check_interval_hours` | `24` | How often to check for a newer version (hours) |
 | `update.skipped_version` | `""` | App‑managed. Set by **Skip this version**; normally you don't edit it |

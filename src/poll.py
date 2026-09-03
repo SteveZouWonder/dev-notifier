@@ -1255,14 +1255,30 @@ def _pd_oncall_item(fp: str, name: str, text: str, url: str, sound=True) -> dict
 
 def _pd_oncall_items(pd: dict, token: str, user_id: str, window_start, now,
                      status=None):
-    """Shift reminders (before / start / end) + current & next shift summary.
+    """Shift reminders (before / start / end) + on-call summary for the menu.
 
-    ``status`` (if given) is filled with ``on_call``, ``until``, ``schedule``,
-    ``next_start`` and ``next_schedule`` for the menu.
+    ``status`` (if given) receives:
+
+    - ``shifts``: every escalation level you are currently on, one dict per
+      entry — ``{"level", "name", "until" (ISO or None), "url", "direct"}`` —
+      sorted by level. The menu renders each with level-specific wording
+      (primary / backup / fallback) and a link to its schedule or policy.
+    - ``on_call``: True when a current entry is within
+      ``pagerduty.oncall_max_level`` (default 1 — what PagerDuty's own
+      "On call now" shows). Deeper levels are listed but do not count.
+    - ``until`` / ``schedule`` / ``url`` / ``level``: the counting entry with
+      the latest end (a scheduled shift beats a schedule-less direct target).
+    - ``next_start`` / ``next_schedule`` / ``next_url`` / ``next_level``: the
+      earliest upcoming counting shift.
+
+    Reminders (before / start / end) are emitted only for counting levels;
+    being someone's level-3 fallback is not worth a pop-up.
     """
     if status is not None:
         status.update({"on_call": False, "until": None, "schedule": "",
-                       "next_start": None, "next_schedule": ""})
+                       "url": "", "level": 0, "shifts": [],
+                       "next_start": None, "next_schedule": "", "next_url": "",
+                       "next_level": 0})
     if not user_id or not pd.get("oncall_reminders", True):
         return []
     remind = []
@@ -1283,42 +1299,49 @@ def _pd_oncall_items(pd: dict, token: str, user_id: str, window_start, now,
 
     items = []
     seen = set()
-    current = None   # (end_dt or None, name, url, level)
-    upcoming = None  # (start_dt, name, url, level)
+    shifts = []      # every current entry, all levels
+    current = None   # best *counting* entry: (end_dt or None, name, url, level)
+    upcoming = None  # earliest upcoming counting entry: (start, name, url, level)
     for oc in oncalls:
-        # ``/oncalls`` lists *every* escalation level you sit on. PagerDuty's
-        # own "ON CALL NOW" only shows level 1; being the level-3 fallback on
-        # a policy is not what anyone means by "I'm on-call", so deeper levels
-        # are ignored unless ``oncall_max_level`` is raised.
         level = _pd_level(oc)
-        if level > max_level:
-            continue
+        counts = level <= max_level
         sched = oc.get("schedule") or {}
         pol = oc.get("escalation_policy") or {}
         name = sched.get("summary") or pol.get("summary") or "on-call"
-        if level > 1:
-            name = f"{name} · level {level}"
         url = sched.get("html_url") or pol.get("html_url") or ""
         start = _parse_dt(oc.get("start"))
         end = _parse_dt(oc.get("end"))
         if start is None or end is None:
             # A direct user target on the escalation policy (no schedule):
-            # on-call indefinitely. A schedule-based shift is the more useful
-            # thing to show (it has an end time), so this only fills in when
-            # nothing else does — and a later scheduled shift may replace it.
-            if current is None:
+            # on-call indefinitely at that level.
+            key = (sched.get("id") or pol.get("id") or "", level, None)
+            if key in seen:
+                continue
+            seen.add(key)
+            shifts.append({"level": level, "name": name, "until": None,
+                           "url": url, "direct": True})
+            # A scheduled shift is the more useful thing to show (it has an
+            # end time), so this only fills in when nothing else does.
+            if counts and current is None:
                 current = (None, name, url, level)
             continue
-        key = (sched.get("id") or pol.get("id") or "", oc.get("start"))
+        key = (sched.get("id") or pol.get("id") or "", level, oc.get("start"))
         if key in seen:
             continue
         seen.add(key)
-        if start <= now < end and (current is None or current[0] is None
-                                   or end > current[0]):
-            current = (end, name, url, level)
-        elif start > now and (upcoming is None or start < upcoming[0]):
+        if start <= now < end:
+            shifts.append({"level": level, "name": name,
+                           "until": end.isoformat(), "url": url,
+                           "direct": False})
+            if counts and (current is None or current[0] is None
+                           or end > current[0]):
+                current = (end, name, url, level)
+        elif start > now and counts and (upcoming is None
+                                         or start < upcoming[0]):
             upcoming = (start, name, url, level)
 
+        if not counts:
+            continue  # no reminders for fallback levels
         base = f"pd-oncall:{key[0]}:{oc.get('start', '')}"
         span = f"{pd_format_time(start)} – {pd_format_time(end)}"
         if window_start < start <= now:
@@ -1338,6 +1361,11 @@ def _pd_oncall_items(pd: dict, token: str, user_id: str, window_start, now,
                 sound=False))
 
     if status is not None:
+        # Level first; within a level, scheduled shifts (with an end) before
+        # direct targets, then by end time.
+        shifts.sort(key=lambda sh: (sh["level"], sh["until"] is None,
+                                    sh["until"] or ""))
+        status["shifts"] = shifts
         if current is not None:
             status["on_call"] = True
             status["until"] = current[0].isoformat() if current[0] else None
@@ -1348,6 +1376,7 @@ def _pd_oncall_items(pd: dict, token: str, user_id: str, window_start, now,
             status["next_start"] = upcoming[0].isoformat()
             status["next_schedule"] = upcoming[1]
             status["next_url"] = upcoming[2]
+            status["next_level"] = upcoming[3]
     return items
 
 

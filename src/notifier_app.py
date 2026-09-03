@@ -577,19 +577,62 @@ class NotifierApp:
     # How many open incidents assigned to you to list in the PagerDuty submenu.
     PD_MENU_INCIDENTS = 5
 
+    @staticmethod
+    def _pd_level_label(level: int) -> str:
+        """Wording for an on-call escalation level.
+
+        Level 1 is what PagerDuty itself calls "on call now"; level 2 is the
+        person paged if level 1 does not acknowledge; anything deeper is a
+        last-resort fallback. Saying "On-call" for all of them is what made the
+        menu contradict the PagerDuty service page.
+        """
+        if level <= 1:
+            return "On-call now"
+        if level == 2:
+            return "Backup on-call (level 2)"
+        return f"Fallback on-call (level {level})"
+
+    def _pd_shift_line(self, shift: dict) -> str:
+        line = self._pd_level_label(int(shift.get("level") or 1))
+        until = poll_mod.pd_format_time(shift.get("until"))
+        if until:
+            line += f" until {until}"
+        elif shift.get("direct"):
+            # No end: listed directly on the escalation policy, not a schedule.
+            line += " · direct policy target, no end"
+        if shift.get("name"):
+            line += f" ({shift['name']})"
+        return line[:90]
+
+    def _pd_link_item(self, label: str, url: str) -> MenuItem:
+        """A menu row that opens ``url`` (schedule / policy / incident)."""
+        item = MenuItem(label, callback=self._open_pd_incident if url else None)
+        item.url = url or ""
+        return item
+
     def _pagerduty_menuitem(self):
-        """PagerDuty ▸ submenu: on-call shift + open incidents assigned to you.
+        """PagerDuty ▸ submenu: on-call levels + open incidents assigned to you.
 
         Only shown when PagerDuty is enabled. The data comes from the last
         poll (``self.pd_status``); before the first poll it shows a
-        placeholder. Each listed incident opens in the browser when clicked.
+        placeholder. Every escalation level you currently sit on is listed with
+        level-specific wording (primary / backup / fallback) and opens its
+        schedule or escalation policy in PagerDuty when clicked, so the menu
+        can be checked against the PagerDuty service page. Each listed
+        incident opens in the browser when clicked.
         """
         if not self.cfg.get("pagerduty", {}).get("enabled"):
             return None
         s = self.pd_status or {}
         active = s.get("active_incidents") or []
+        shifts = s.get("shifts") or []
+        deeper = [sh for sh in shifts if int(sh.get("level") or 1) > 1]
         if s.get("on_call"):
             head = "PagerDuty: on-call"
+        elif "on_call" in s and deeper:
+            head = ("PagerDuty: backup on-call" if any(
+                int(sh.get("level") or 1) == 2 for sh in deeper)
+                else "PagerDuty: fallback on-call")
         elif "on_call" in s:
             head = "PagerDuty: not on-call"
         else:
@@ -600,30 +643,32 @@ class NotifierApp:
         if "on_call" not in s:
             parent.add(MenuItem("Waiting for first check…", callback=None))
             return parent
-        if s.get("on_call"):
-            until = poll_mod.pd_format_time(s.get("until"))
-            line = "On-call now"
-            if until:
-                line += f" until {until}"
-            else:
-                # No end: a direct escalation-policy target, not a schedule.
-                line += " (no end — direct policy target)"
-            if s.get("schedule"):
-                line += f" ({s['schedule']})"
-            link = s.get("url", "")
-        else:
-            line = "Not on-call"
+
+        if shifts:
+            for sh in shifts:
+                parent.add(self._pd_link_item(self._pd_shift_line(sh),
+                                              sh.get("url", "")))
+        elif s.get("on_call"):
+            # Older status payload without ``shifts`` (or a counting entry
+            # that was not itemised): fall back to the summary fields.
+            parent.add(self._pd_link_item(self._pd_shift_line({
+                "level": s.get("level") or 1, "until": s.get("until"),
+                "name": s.get("schedule"), "direct": not s.get("until"),
+            }), s.get("url", "")))
+        if not s.get("on_call"):
+            line = "Not on-call" if not deeper else "Not primary on-call"
             nxt = poll_mod.pd_format_time(s.get("next_start"))
             if nxt:
                 line += f" · next: {nxt}"
                 if s.get("next_schedule"):
                     line += f" ({s['next_schedule']})"
-            link = s.get("next_url", "")
-        # Clicking the line opens the schedule / escalation policy in PagerDuty
-        # so the user can see *why* they are (or are not) on-call.
-        shift_item = MenuItem(line, callback=self._open_pd_incident if link else None)
-        shift_item.url = link
-        parent.add(shift_item)
+            parent.add(self._pd_link_item(line, s.get("next_url", "")))
+        elif s.get("next_start"):
+            nxt = poll_mod.pd_format_time(s.get("next_start"))
+            line = f"Next: {nxt}"
+            if s.get("next_schedule"):
+                line += f" ({s['next_schedule']})"
+            parent.add(self._pd_link_item(line, s.get("next_url", "")))
         parent.add(MenuItem.sep())
         if not active:
             parent.add(MenuItem("No open incidents assigned to you",
@@ -636,9 +681,7 @@ class NotifierApp:
             if inc.get("urgency") == "high":
                 label += " ⚡"
             label = f"{label} — {inc.get('title', '')}"[:80]
-            item = MenuItem(label, callback=self._open_pd_incident)
-            item.url = inc.get("url", "")
-            parent.add(item)
+            parent.add(self._pd_link_item(label, inc.get("url", "")))
         return parent
 
     def _open_pd_incident(self, sender):

@@ -1245,10 +1245,71 @@ def test_pagerduty_menuitem_minimal_fields(app):
     app.pd_status = {"on_call": True, "until": None, "schedule": "",
                      "next_start": None, "active_incidents": []}
     line = app._pagerduty_menuitem().children[0]
-    assert line.title == "On-call now (no end — direct policy target)"
+    assert line.title == "On-call now · direct policy target, no end"
     assert line.callback is None  # no url -> not clickable
     app.pd_status = {"on_call": False, "next_start": None}
     assert _pd_children(app._pagerduty_menuitem())[0] == "Not on-call"
+
+
+def test_pagerduty_menuitem_lists_every_level_with_wording(app, app_mod):
+    """Each escalation level is listed with its own wording and opens its
+    schedule / policy; only level 1 makes the header say "on-call"."""
+    app.cfg["pagerduty"] = {"enabled": True}
+    until = "2026-07-02T18:00:00+00:00"
+    app.pd_status = {
+        "on_call": True, "until": until, "schedule": "Primary",
+        "url": "https://pd/schedules/PS1", "level": 1,
+        "shifts": [
+            {"level": 1, "name": "Primary", "until": until,
+             "url": "https://pd/schedules/PS1", "direct": False},
+            {"level": 2, "name": "Secondary", "until": until,
+             "url": "https://pd/schedules/PS2", "direct": False},
+            {"level": 3, "name": "[TECH][FE] App-ep", "until": None,
+             "url": "https://pd/ep/P", "direct": True},
+        ],
+        "next_start": "2026-07-03T09:00:00+00:00", "next_schedule": "Primary",
+        "next_url": "https://pd/schedules/PS1", "active_incidents": [],
+    }
+    item = app._pagerduty_menuitem()
+    assert item.title == "PagerDuty: on-call"
+    fmt = app_mod.poll_mod.pd_format_time
+    rows = item.children[:4]
+    assert [r.title for r in rows] == [
+        f"On-call now until {fmt(until)} (Primary)",
+        f"Backup on-call (level 2) until {fmt(until)} (Secondary)",
+        "Fallback on-call (level 3) · direct policy target, no end ([TECH][FE] App-ep)",
+        f"Next: {fmt('2026-07-03T09:00:00+00:00')} (Primary)",
+    ]
+    for row, url in zip(rows, ["https://pd/schedules/PS1", "https://pd/schedules/PS2",
+                               "https://pd/ep/P", "https://pd/schedules/PS1"]):
+        row.callback(row)
+        assert app.backend.opened_urls[-1] == url
+
+
+def test_pagerduty_menuitem_fallback_only_is_not_on_call(app):
+    """Only a level-2/3 entry: header says backup/fallback, the row explains,
+    and the "not primary" line links to the next real shift."""
+    app.cfg["pagerduty"] = {"enabled": True}
+    app.pd_status = {
+        "on_call": False, "shifts": [
+            {"level": 3, "name": "[TECH][FE] App-ep", "until": None,
+             "url": "https://pd/ep/P", "direct": True}],
+        "next_start": None, "active_incidents": [],
+    }
+    item = app._pagerduty_menuitem()
+    assert item.title == "PagerDuty: fallback on-call"
+    titles = _pd_children(item)
+    assert titles[0].startswith("Fallback on-call (level 3)")
+    assert titles[1] == "Not primary on-call"
+    app.pd_status["shifts"][0]["level"] = 2
+    assert app._pagerduty_menuitem().title == "PagerDuty: backup on-call"
+
+
+def test_pd_level_label(app):
+    assert app._pd_level_label(1) == "On-call now"
+    assert app._pd_level_label(0) == "On-call now"
+    assert app._pd_level_label(2) == "Backup on-call (level 2)"
+    assert app._pd_level_label(4) == "Fallback on-call (level 4)"
 
 
 def test_pagerduty_menuitem_shift_line_opens_schedule(app):
