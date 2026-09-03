@@ -4,13 +4,16 @@ This project ships as an unsigned, ad-hoc-signed ``.app`` inside a ``.dmg`` on
 GitHub Releases. Fully silent, in-place replacement of an unsigned app is risky
 on macOS (Gatekeeper / quarantine), so instead we:
 
-  1. Read the running app's version from ``Info.plist`` (frozen) or a fallback
-     ``__version__`` from source.
+  1. Read the running app's version from the ``APP_VERSION`` stamp the build
+     bundles (frozen, all platforms), else ``Info.plist`` (macOS), else the
+     fallback ``__version__`` (source runs).
   2. Query the GitHub Releases API for the newest ``vX.Y.Z`` release.
   3. If newer, surface it in the menu bar and via a clickable notification.
-  4. On the user's request, download the release DMG to a cache dir, verify its
-     SHA-256 against the release's ``SHA256SUMS.txt``, then ``open`` the DMG so
-     the user drags the new app into /Applications (the usual first-run flow).
+  4. On the user's request, download the platform's installer to a cache dir,
+     verify its SHA-256 against the release's ``SHA256SUMS.txt``, then open it:
+     macOS ``open``s the DMG so the user drags the new app into /Applications;
+     Windows launches the Inno Setup ``-setup.exe``, which closes the running
+     app, replaces it in place and relaunches it.
 
 All network + disk work here is blocking and MUST be called from a worker
 thread; the caller hands UI results back to the main thread. Nothing in this
@@ -40,16 +43,27 @@ GITHUB_REPO = "dev-notifier"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
 
-# Fallback version when running from source (not a PyInstaller bundle). Keep in
-# sync with the latest tag; from-source runs skip update prompts anyway.
+# Fallback version when running from source (not a PyInstaller bundle). Frozen
+# builds do NOT rely on this: the PyInstaller specs stamp the release version
+# into the bundle (``APP_VERSION`` data file on both platforms, plus Info.plist
+# on macOS), and ``current_version()`` reads that first. From-source runs skip
+# update prompts anyway.
 __version__ = "1.3.0"
+
+# Name of the version stamp file the PyInstaller specs bundle next to the app's
+# data (``sys._MEIPASS/APP_VERSION``). Contents: the bare version, e.g. 1.5.9.
+VERSION_STAMP_NAME = "APP_VERSION"
 
 _USER_AGENT = f"{GITHUB_REPO}-updater"
 _HTTP_TIMEOUT = 15  # seconds
 _DMG_NAME_RE = re.compile(r"DevNotifier-.*\.dmg$", re.IGNORECASE)
-# Windows installer asset (published alongside the macOS DMG on the same
-# release). Matches e.g. DevNotifier-1.4.0-setup.exe or DevNotifier-1.4.0.exe.
+# Windows assets (published alongside the macOS DMG on the same release):
+#   DevNotifier-<ver>-setup.exe     Inno Setup installer  (preferred)
+#   DevNotifier-<ver>-portable.exe  bare one-file exe     (fallback)
+# The updater launches the installer, which replaces the installed copy; the
+# portable exe is only used when no installer asset exists on the release.
 _EXE_NAME_RE = re.compile(r"DevNotifier-.*\.exe$", re.IGNORECASE)
+_SETUP_EXE_RE = re.compile(r"DevNotifier-.*-setup\.exe$", re.IGNORECASE)
 
 # Cache dir for downloaded installers. Resolved via the cross-platform paths
 # helper; on macOS this is exactly the historical ~/Library/Caches/dev-notifier
@@ -86,28 +100,60 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def _bundled_version_stamp():
+    """Version stamped into the PyInstaller bundle at build time, or ``None``.
+
+    Both specs write ``APP_VERSION`` (the release tag without ``v``) into a data
+    file bundled at the root of the frozen app (``sys._MEIPASS``). This is the
+    only version source on Windows, where there is no Info.plist; previously
+    Windows builds fell back to the stale module ``__version__`` and therefore
+    always believed an update was available.
+    """
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        return None
+    try:
+        v = (Path(base) / VERSION_STAMP_NAME).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return v if parse_version(v) else None
+
+
+def _info_plist_version():
+    """``CFBundleShortVersionString`` of the enclosing ``.app``, or ``None``."""
+    exe = Path(sys.executable)  # .../DevNotifier.app/Contents/MacOS/DevNotifier
+    for parent in exe.parents:
+        if parent.suffix == ".app":
+            plist = parent / "Contents" / "Info.plist"
+            try:
+                with plist.open("rb") as f:
+                    data = plistlib.load(f)
+                v = data.get("CFBundleShortVersionString")
+                if v:
+                    return str(v)
+            except (OSError, plistlib.InvalidFileException, ValueError):
+                pass
+            break
+    return None
+
+
 def current_version() -> str:
     """Version of the running app.
 
-    Frozen on macOS: read ``CFBundleShortVersionString`` from the ``.app``
-    bundle's Info.plist. Frozen on Windows (and any other case): fall back to
-    the module ``__version__``, which the build keeps in sync with the release
-    tag. Source runs also use ``__version__`` (and skip update prompts anyway).
+    Frozen: prefer the ``APP_VERSION`` stamp the build bundles (all
+    platforms); on macOS fall back to ``CFBundleShortVersionString`` from the
+    ``.app`` bundle's Info.plist. Source runs (and a frozen build with no stamp,
+    e.g. a hand-rolled ``pyinstaller`` without ``APP_VERSION``) use the module
+    ``__version__``.
     """
-    if is_frozen() and sys.platform != "win32":
-        exe = Path(sys.executable)  # .../DevNotifier.app/Contents/MacOS/DevNotifier
-        for parent in exe.parents:
-            if parent.suffix == ".app":
-                plist = parent / "Contents" / "Info.plist"
-                try:
-                    with plist.open("rb") as f:
-                        data = plistlib.load(f)
-                    v = data.get("CFBundleShortVersionString")
-                    if v:
-                        return str(v)
-                except (OSError, plistlib.InvalidFileException, ValueError):
-                    pass
-                break
+    if is_frozen():
+        v = _bundled_version_stamp()
+        if v:
+            return v
+        if sys.platform != "win32":
+            v = _info_plist_version()
+            if v:
+                return v
     return __version__
 
 
@@ -189,13 +235,21 @@ def fetch_latest_release() -> dict:
     dmg_url = dmg_name = sha_url = None
     installer_url = installer_name = None
     installer_re = _installer_regex()
+    # On Windows a release may carry both the Inno Setup installer
+    # (``-setup.exe``) and the portable one-file exe. Always prefer the
+    # installer: launching the portable exe just starts a second copy of the
+    # app and never replaces the installed one.
+    preferred = False
     for asset in data.get("assets", []) or []:
         name = asset.get("name", "") or ""
         url = asset.get("browser_download_url")
         if _DMG_NAME_RE.search(name):
             dmg_url, dmg_name = url, name
         if installer_re and installer_re.search(name):
-            installer_url, installer_name = url, name
+            is_setup = bool(_SETUP_EXE_RE.search(name))
+            if is_setup or not preferred:
+                installer_url, installer_name = url, name
+                preferred = preferred or is_setup
         if name == "SHA256SUMS.txt":
             sha_url = url
     return {

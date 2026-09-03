@@ -20,6 +20,15 @@ if _menubar.exists():
 _icon = PROJECT_ROOT / "assets" / "icon.icns"
 app_icon = str(_icon) if _icon.exists() else None
 
+# Stamp the release version into the bundle (sys._MEIPASS/APP_VERSION). The
+# updater reads this first on every platform (Info.plist stays as a fallback),
+# so the running app always knows its real version.
+_build_dir = PROJECT_ROOT / "build"
+_build_dir.mkdir(parents=True, exist_ok=True)
+_stamp = _build_dir / "APP_VERSION"
+_stamp.write_text(APP_VERSION + "\n", encoding="utf-8")
+datas.append((str(_stamp), "."))
+
 # Bundle certifi's CA bundle so Jira (and other https) TLS verification works
 # in the packaged app; the system Python's default store cannot verify some
 # public certificate chains (CERTIFICATE_VERIFY_FAILED).

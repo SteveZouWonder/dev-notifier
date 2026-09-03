@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `pagerduty.suppress_self` now applies to incidents assigned to you as well (previously only to team incidents), so acknowledging your own incident no longer pops up a notification
 - the PagerDuty identity lookup (`/users/me`) is cached for 6 hours instead of running on every poll when `user_id`/`team_ids` are left blank, and incident/timeline/on-call queries follow pagination instead of stopping at 50 results
 - the "All good" dependency-check and "setup needed" messages now mention PagerDuty (previously only Jira/GitHub); the TUTORIAL documents `suppress_self` and the new PagerDuty options
+- Windows releases now ship a real installer, `DevNotifier-<version>-setup.exe` (Inno Setup; per-user, no admin rights): Start Menu entry, uninstaller, an optional "start when I sign in" task, and in-place upgrades that close the running app and relaunch it. The bare one-file exe is still published as `DevNotifier-<version>-portable.exe`. The in-app updater prefers the installer asset
+- Windows builds carry the release version (bundled `APP_VERSION` stamp plus a `VERSIONINFO` resource visible in Properties ▸ Details) and ship a proper multi-size `.ico`
+- `gh` is also looked up in its usual Windows install locations (`Program Files\GitHub CLI`, scoop shims), and the "gh CLI is not installed" hint suggests `winget install --id GitHub.cli` on Windows instead of `brew install gh`
+
+### Fixed
+- Windows builds always reported version `1.3.0` because the release version was never stamped into the exe, so every launch announced an "update available", and "Download & Install" merely opened the downloaded one-file exe — a second copy of the app — while claiming an installer had been opened. The app now reads the version stamped at build time, so it recognises when it is up to date, and updates run the real installer
+- "Start at login" on Windows pinned the registry `Run` entry to whatever path the exe was launched from (e.g. `Downloads\DevNotifier-1.5.8.exe`), silently breaking once the file was moved or deleted. It now points at the installed `DevNotifier.exe` when the app is installed, and the installer repoints an existing entry
+- `gh` output is decoded as UTF-8 (it was decoded with the Windows locale codec, so a non-ASCII PR title or user name raised `UnicodeDecodeError` and dropped the whole GitHub poll), and `gh` is run without flashing a console window on Windows
 
 ## [v1.5.8] - 2026-07-15
 

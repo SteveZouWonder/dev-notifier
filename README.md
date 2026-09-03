@@ -50,12 +50,19 @@ native Action Center toasts via `winotify`.
 
 ### Windows
 
-1. Grab the latest `DevNotifier-<version>.exe` from
+1. Grab the latest `DevNotifier-<version>-setup.exe` from
    [Releases](../../releases).
-2. Run it. This is an unsigned open-source build, so SmartScreen may warn
-   ("Windows protected your PC" → **More info** → **Run anyway**).
+2. Run it and follow the installer (per-user, no admin rights needed). It adds
+   a Start Menu entry, an uninstaller and — if you leave the box ticked —
+   starts the app when you sign in. This is an unsigned open-source build, so
+   SmartScreen may warn ("Windows protected your PC" → **More info** →
+   **Run anyway**).
 3. The app appears in the system tray (right-click for the menu). Allow
    notifications when prompted.
+
+Prefer no installer? `DevNotifier-<version>-portable.exe` is the bare app:
+just run it from wherever you keep it. In-app updates always fetch the
+installer, which replaces an existing install in place.
 
 ## Configuration
 
@@ -165,11 +172,13 @@ pip install -r requirements-build.txt
 # Run directly:
 python launcher.py
 
-# Or build the one-file .exe:
-$env:APP_VERSION = "1.0.0"
+# Or build the installer + portable .exe (needs Inno Setup 6:
+# winget install JRSoftware.InnoSetup):
+$env:APP_VERSION = "1.0.0"   # stamped into the exe; the updater reads it
 pyinstaller packaging/dev-notifier-win.spec --noconfirm
 pwsh packaging/windows_package.ps1
-# -> dist/DevNotifier-1.0.0.exe
+# -> dist/DevNotifier-1.0.0-setup.exe, dist/DevNotifier-1.0.0-portable.exe
+# (set $env:DEVNOTIFIER_SKIP_INSTALLER = "1" to skip the Inno Setup step)
 ```
 
 ## Releasing

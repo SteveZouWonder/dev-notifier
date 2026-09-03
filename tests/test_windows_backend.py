@@ -65,9 +65,90 @@ def test_launch_command_frozen(win_mod, monkeypatch):
     monkeypatch.setattr(win_mod.sys, "executable",
                         r"C:\Program Files\DevNotifier\DevNotifier.exe",
                         raising=False)
+    monkeypatch.setattr(win_mod, "_installed_exe", lambda: None)
     cmd = win_mod._launch_command()
     assert cmd == '"C:\\Program Files\\DevNotifier\\DevNotifier.exe"'
     assert "launcher.py" not in cmd
+
+
+def test_launch_command_frozen_prefers_installed_exe(win_mod, monkeypatch):
+    # A portable exe run from Downloads must not pin start-at-login to itself
+    # when the installer has registered a proper install location.
+    monkeypatch.setattr(win_mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(win_mod.sys, "executable",
+                        r"C:\Users\me\Downloads\DevNotifier-1.5.8-portable.exe",
+                        raising=False)
+    monkeypatch.setattr(win_mod, "_installed_exe",
+                        lambda: r"C:\Users\me\AppData\Local\Programs\DevNotifier\DevNotifier.exe")
+    cmd = win_mod._launch_command()
+    assert cmd == '"C:\\Users\\me\\AppData\\Local\\Programs\\DevNotifier\\DevNotifier.exe"'
+
+
+# ---------------------------------------------------------------------------
+# installed-exe lookup (Inno Setup uninstall key)
+# ---------------------------------------------------------------------------
+
+def test_installed_exe_none_without_winreg(win_mod, monkeypatch):
+    # No winreg module at all (macOS/Linux) -> not installed.
+    import builtins
+    real_import = builtins.__import__
+
+    def no_winreg(name, *a, **k):
+        if name == "winreg":
+            raise ImportError("no winreg")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_winreg)
+    assert win_mod._installed_exe() is None
+
+
+def test_installed_exe_none_when_key_absent(win_mod, fake_winreg):
+    assert win_mod._installed_exe() is None
+
+
+def test_installed_exe_reads_hkcu_install_location(win_mod, fake_winreg, tmp_path):
+    install_dir = tmp_path / "DevNotifier"
+    install_dir.mkdir()
+    exe = install_dir / win_mod.APP_EXE_NAME
+    exe.write_bytes(b"MZ")
+    fake_winreg._store[(fake_winreg.HKEY_CURRENT_USER, win_mod.UNINSTALL_KEY)] = {
+        "InstallLocation": (str(install_dir), fake_winreg.REG_SZ),
+    }
+    assert win_mod._installed_exe() == str(exe)
+
+
+def test_installed_exe_falls_back_to_hklm(win_mod, fake_winreg, tmp_path):
+    install_dir = tmp_path / "DevNotifier"
+    install_dir.mkdir()
+    exe = install_dir / win_mod.APP_EXE_NAME
+    exe.write_bytes(b"MZ")
+    # HKCU has an empty location; HKLM (all-users install) has the real one.
+    fake_winreg._store[(fake_winreg.HKEY_CURRENT_USER, win_mod.UNINSTALL_KEY)] = {
+        "InstallLocation": ("", fake_winreg.REG_SZ),
+    }
+    fake_winreg._store[(fake_winreg.HKEY_LOCAL_MACHINE, win_mod.UNINSTALL_KEY)] = {
+        "InstallLocation": (str(install_dir), fake_winreg.REG_SZ),
+    }
+    assert win_mod._installed_exe() == str(exe)
+
+
+def test_installed_exe_none_when_recorded_exe_missing(win_mod, fake_winreg, tmp_path):
+    # Registry says installed, but the exe was deleted -> None (fall back to
+    # the running executable rather than a dead path).
+    fake_winreg._store[(fake_winreg.HKEY_CURRENT_USER, win_mod.UNINSTALL_KEY)] = {
+        "InstallLocation": (str(tmp_path / "gone"), fake_winreg.REG_SZ),
+    }
+    assert win_mod._installed_exe() is None
+
+
+def test_installer_app_id_matches_iss_script(win_mod):
+    # The uninstall key is derived from the Inno Setup AppId; keep them in sync.
+    from pathlib import Path
+    iss = (Path(__file__).resolve().parent.parent / "packaging"
+           / "windows_installer.iss").read_text(encoding="utf-8")
+    # Inno escapes a leading brace as "{{"; the registry key uses a single one.
+    assert f"AppId={{{win_mod.INSTALLER_APP_ID}" in iss
+    assert f'#define RunValueName "{win_mod.RUN_VALUE_NAME}"' in iss
 
 
 # ---------------------------------------------------------------------------

@@ -21,14 +21,59 @@ from pathlib import Path
 _EXTRA_PATHS = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
 
 
+def _extra_paths() -> list:
+    """Common install locations for ``gh`` that a GUI app's PATH may lack."""
+    if sys.platform == "win32":
+        # winget / the MSI put gh under Program Files; scoop under the user dir.
+        roots = [os.environ.get("ProgramFiles"),
+                 os.environ.get("ProgramFiles(x86)"),
+                 os.environ.get("LOCALAPPDATA")]
+        out = []
+        for root in roots:
+            if root:
+                out.append(os.path.join(root, "GitHub CLI"))
+        home = os.environ.get("USERPROFILE")
+        if home:
+            out.append(os.path.join(home, "scoop", "shims"))
+        return out
+    return list(_EXTRA_PATHS)
+
+
 def augmented_env() -> dict:
     env = dict(os.environ)
     parts = env.get("PATH", "").split(os.pathsep)
-    for p in _EXTRA_PATHS:
+    for p in _extra_paths():
         if p not in parts:
             parts.append(p)
     env["PATH"] = os.pathsep.join(parts)
     return env
+
+
+def subprocess_kwargs() -> dict:
+    """Extra ``subprocess.run`` kwargs for invoking CLI tools such as ``gh``.
+
+    - ``encoding="utf-8"`` + ``errors="replace"``: ``gh`` always emits UTF-8,
+      but ``text=True`` alone decodes with the locale codec (cp1252 on most
+      Windows installs), so any non-ASCII PR title / user name raised
+      ``UnicodeDecodeError`` and the whole poll was dropped.
+    - ``creationflags=CREATE_NO_WINDOW`` (Windows only): the app is a windowed
+      (``console=False``) exe, so without this every ``gh`` call flashes a
+      console window on the desktop.
+    """
+    kwargs = {"encoding": "utf-8", "errors": "replace"}
+    flag = getattr(subprocess, "CREATE_NO_WINDOW", None)
+    if sys.platform == "win32" and flag is not None:
+        kwargs["creationflags"] = flag
+    return kwargs
+
+
+def gh_install_hint() -> str:
+    """Platform-appropriate one-liner for installing the gh CLI."""
+    if sys.platform == "win32":
+        return "winget install --id GitHub.cli"
+    if sys.platform == "darwin":
+        return "brew install gh"
+    return "https://cli.github.com"
 
 
 def gh_path() -> str:
@@ -48,8 +93,8 @@ LAUNCH_AGENT_PLIST = LAUNCH_AGENTS_DIR / f"{LAUNCH_AGENT_LABEL}.plist"
 def _run(args, timeout=15):
     try:
         return subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout,
-            env=augmented_env(),
+            args, capture_output=True, timeout=timeout,
+            env=augmented_env(), **subprocess_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -121,7 +166,7 @@ def check_dependencies(cfg: dict) -> dict:
     problems = []
     if github_enabled and not gh["installed"]:
         problems.append("GitHub enabled but gh CLI is not installed "
-                        "(brew install gh)")
+                        f"({gh_install_hint()})")
     elif github_enabled and not gh["authed"]:
         problems.append("gh CLI is not logged in (run: gh auth login)")
     if jira["enabled"] and not jira["configured"]:
