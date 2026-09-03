@@ -24,6 +24,9 @@ def deps_mod(temp_home):
 
 def test_augmented_env_appends_common_paths(deps_mod, monkeypatch):
     import os
+    # The extra paths are platform-specific; pin macOS so this passes on the
+    # native Windows CI job too.
+    monkeypatch.setattr(deps_mod.sys, "platform", "darwin")
     monkeypatch.setenv("PATH", "/usr/bin")
     env = deps_mod.augmented_env()
     # augmented_env joins with os.pathsep (':' on POSIX, ';' on Windows).
