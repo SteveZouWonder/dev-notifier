@@ -33,6 +33,84 @@ def test_augmented_env_appends_common_paths(deps_mod, monkeypatch):
     assert parts.count("/usr/bin") == 1
 
 
+def test_extra_paths_windows_uses_gh_install_dirs(deps_mod, monkeypatch):
+    monkeypatch.setattr(deps_mod.sys, "platform", "win32")
+    monkeypatch.setenv("ProgramFiles", r"C:\Program Files")
+    monkeypatch.setenv("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\Users\me\AppData\Local")
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\me")
+    paths = deps_mod._extra_paths()
+    # os.path.join uses the host separator, so only assert on the components.
+    assert any(p.endswith("GitHub CLI") and p.startswith(r"C:\Program Files")
+               for p in paths)
+    assert any(p.endswith("shims") and "scoop" in p for p in paths)
+    assert "/opt/homebrew/bin" not in paths
+
+
+def test_extra_paths_windows_skips_unset_roots(deps_mod, monkeypatch):
+    monkeypatch.setattr(deps_mod.sys, "platform", "win32")
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA", "USERPROFILE"):
+        monkeypatch.delenv(var, raising=False)
+    assert deps_mod._extra_paths() == []
+
+
+# ---------------------------------------------------------------------------
+# subprocess_kwargs / gh_install_hint
+# ---------------------------------------------------------------------------
+
+def test_subprocess_kwargs_decodes_utf8_with_replacement(deps_mod):
+    # gh emits UTF-8; decoding with the locale codec (cp1252 on Windows) used to
+    # raise UnicodeDecodeError on any non-ASCII title and drop the whole poll.
+    kw = deps_mod.subprocess_kwargs()
+    assert kw["encoding"] == "utf-8"
+    assert kw["errors"] == "replace"
+
+
+def test_subprocess_kwargs_hides_console_window_on_windows(deps_mod, monkeypatch):
+    monkeypatch.setattr(deps_mod.sys, "platform", "win32")
+    monkeypatch.setattr(deps_mod.subprocess, "CREATE_NO_WINDOW", 0x08000000,
+                        raising=False)
+    assert deps_mod.subprocess_kwargs()["creationflags"] == 0x08000000
+
+
+def test_subprocess_kwargs_no_creationflags_off_windows(deps_mod, monkeypatch):
+    monkeypatch.setattr(deps_mod.sys, "platform", "darwin")
+    assert "creationflags" not in deps_mod.subprocess_kwargs()
+
+
+def test_run_passes_subprocess_kwargs(deps_mod, monkeypatch, fake_proc):
+    seen = {}
+
+    def fake_run(args, **kw):
+        seen.update(kw)
+        return fake_proc(returncode=0)
+
+    monkeypatch.setattr(deps_mod.subprocess, "run", fake_run)
+    assert deps_mod._run(["gh", "auth", "status"]) is not None
+    assert seen["encoding"] == "utf-8"
+    assert seen["capture_output"] is True
+    assert "text" not in seen  # encoding= implies text mode
+
+
+@pytest.mark.parametrize("platform,expected", [
+    ("win32", "winget install --id GitHub.cli"),
+    ("darwin", "brew install gh"),
+    ("linux", "https://cli.github.com"),
+])
+def test_gh_install_hint_is_platform_aware(deps_mod, monkeypatch, platform, expected):
+    monkeypatch.setattr(deps_mod.sys, "platform", platform)
+    assert deps_mod.gh_install_hint() == expected
+
+
+def test_check_dependencies_gh_hint_matches_platform(deps_mod, monkeypatch, sample_cfg):
+    monkeypatch.setattr(deps_mod.sys, "platform", "win32")
+    monkeypatch.setattr(deps_mod, "check_gh", lambda: {
+        "installed": False, "authed": False, "login": "", "detail": "x"})
+    status = deps_mod.check_dependencies(sample_cfg)
+    assert any("winget install --id GitHub.cli" in p for p in status["problems"])
+    assert not any("brew" in p for p in status["problems"])
+
+
 def test_gh_path_falls_back_to_bare_gh(deps_mod, monkeypatch):
     monkeypatch.setattr(deps_mod.shutil, "which", lambda *a, **k: None)
     assert deps_mod.gh_path() == "gh"

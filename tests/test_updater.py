@@ -198,10 +198,100 @@ def test_installer_regex_other_platform_is_none(updater_mod):
 
 
 def test_current_version_frozen_windows_uses_module_version(updater_mod, monkeypatch):
-    # On Windows there is no Info.plist; frozen falls back to __version__.
+    # On Windows there is no Info.plist; frozen without a version stamp (a
+    # hand-rolled pyinstaller build) falls back to __version__.
     monkeypatch.setattr(updater_mod, "is_frozen", lambda: True)
     monkeypatch.setattr(updater_mod.sys, "platform", "win32")
+    monkeypatch.delattr(updater_mod.sys, "_MEIPASS", raising=False)
     assert updater_mod.current_version() == updater_mod.__version__
+
+
+# ---------------------------------------------------------------------------
+# build-time version stamp (sys._MEIPASS/APP_VERSION)
+# ---------------------------------------------------------------------------
+
+def _stamp(tmp_path, updater_mod, text):
+    (tmp_path / updater_mod.VERSION_STAMP_NAME).write_text(text, encoding="utf-8")
+
+
+def test_current_version_frozen_windows_reads_bundled_stamp(updater_mod, monkeypatch,
+                                                            tmp_path):
+    # Regression: the Windows build used to report the stale module
+    # __version__ forever, so every launch claimed an update was available.
+    _stamp(tmp_path, updater_mod, "1.5.9\n")
+    monkeypatch.setattr(updater_mod, "is_frozen", lambda: True)
+    monkeypatch.setattr(updater_mod.sys, "platform", "win32")
+    monkeypatch.setattr(updater_mod.sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert updater_mod.current_version() == "1.5.9"
+    assert updater_mod.is_newer("1.5.9", updater_mod.current_version()) is False
+
+
+def test_current_version_stamp_wins_over_info_plist(updater_mod, monkeypatch, tmp_path):
+    import plistlib
+    app = tmp_path / "DevNotifier.app"
+    macos = app / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    with (app / "Contents" / "Info.plist").open("wb") as f:
+        plistlib.dump({"CFBundleShortVersionString": "8.8.8"}, f)
+    _stamp(tmp_path, updater_mod, "9.9.9")
+
+    monkeypatch.setattr(updater_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(updater_mod, "is_frozen", lambda: True)
+    monkeypatch.setattr(updater_mod.sys, "_MEIPASS", str(tmp_path), raising=False)
+    monkeypatch.setattr(updater_mod.sys, "executable",
+                        str(macos / "DevNotifier"), raising=False)
+    assert updater_mod.current_version() == "9.9.9"
+
+
+def test_bundled_stamp_ignored_when_unparseable(updater_mod, monkeypatch, tmp_path):
+    _stamp(tmp_path, updater_mod, "not-a-version")
+    monkeypatch.setattr(updater_mod.sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert updater_mod._bundled_version_stamp() is None
+
+
+def test_bundled_stamp_none_when_file_missing(updater_mod, monkeypatch, tmp_path):
+    monkeypatch.setattr(updater_mod.sys, "_MEIPASS", str(tmp_path), raising=False)
+    assert updater_mod._bundled_version_stamp() is None
+
+
+def test_bundled_stamp_none_when_not_frozen_layout(updater_mod, monkeypatch):
+    monkeypatch.delattr(updater_mod.sys, "_MEIPASS", raising=False)
+    assert updater_mod._bundled_version_stamp() is None
+
+
+def test_fetch_latest_release_prefers_setup_exe_on_windows(updater_mod, monkeypatch):
+    # Both the installer and the portable exe are published; the updater must
+    # pick the installer regardless of asset order (launching the portable exe
+    # only starts a second copy of the app and never replaces the install).
+    monkeypatch.setattr(updater_mod.sys, "platform", "win32")
+
+    def payload(order):
+        assets = {
+            "portable": {"name": "DevNotifier-1.6.0-portable.exe",
+                         "browser_download_url": "https://x/portable.exe"},
+            "setup": {"name": "DevNotifier-1.6.0-setup.exe",
+                      "browser_download_url": "https://x/setup.exe"},
+        }
+        return {"tag_name": "v1.6.0", "html_url": "u",
+                "assets": [assets[k] for k in order]}
+
+    for order in (["portable", "setup"], ["setup", "portable"]):
+        monkeypatch.setattr(updater_mod, "_http_get",
+                            lambda *a, **k: json.dumps(payload(order)).encode())
+        rel = updater_mod.fetch_latest_release()
+        assert rel["installer_name"] == "DevNotifier-1.6.0-setup.exe", order
+        assert rel["installer_url"] == "https://x/setup.exe"
+
+
+def test_fetch_latest_release_portable_exe_when_no_installer(updater_mod, monkeypatch):
+    monkeypatch.setattr(updater_mod.sys, "platform", "win32")
+    payload = {"tag_name": "v1.5.8", "html_url": "u", "assets": [
+        {"name": "DevNotifier-1.5.8.exe", "browser_download_url": "https://x/a.exe"},
+    ]}
+    monkeypatch.setattr(updater_mod, "_http_get",
+                        lambda *a, **k: json.dumps(payload).encode())
+    rel = updater_mod.fetch_latest_release()
+    assert rel["installer_name"] == "DevNotifier-1.5.8.exe"
 
 
 def test_fetch_latest_release_picks_exe_on_windows(updater_mod, monkeypatch):

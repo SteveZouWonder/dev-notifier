@@ -289,6 +289,7 @@ def fake_winreg():
     """
     stub = types.ModuleType("winreg")
     stub.HKEY_CURRENT_USER = "HKCU"
+    stub.HKEY_LOCAL_MACHINE = "HKLM"
     stub.REG_SZ = 1
     stub.KEY_SET_VALUE = 0x0002
     # store: {(hive, subkey): {value_name: (data, type)}}

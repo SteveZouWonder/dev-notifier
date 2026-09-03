@@ -33,12 +33,14 @@ command line needed.
 4. If it asks to send notifications, click **Allow**.
 
 **Windows**
-1. Download the latest **`DevNotifier‑<version>.exe`** from
+1. Download the latest **`DevNotifier‑<version>‑setup.exe`** from
    [Releases](../../releases).
-2. Double‑click it. If Windows shows *"Windows protected your PC"*, click
-   **More info** → **Run anyway**.
+2. Double‑click it and click through the installer (no admin rights needed).
+   If Windows shows *"Windows protected your PC"*, click **More info** →
+   **Run anyway**.
    *(Same reason as above — it's an unsigned open‑source build, not a virus.)*
-3. If it asks to send notifications, click **Allow**.
+3. Leave **"Start Dev Notifier when I sign in"** ticked if you want it to run
+   automatically. If it asks to send notifications, click **Allow**.
 
 A small **lightning‑bolt icon** now appears — in the menu bar (macOS, top‑right)
 or the system tray (Windows, bottom‑right; click the ▲ arrow if it's hidden).

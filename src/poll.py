@@ -334,7 +334,7 @@ def _gh_json(args: list):
     try:
         out = subprocess.run(
             [_deps.gh_path()] + args, check=True, capture_output=True,
-            text=True, timeout=45, env=_deps.augmented_env(),
+            timeout=45, env=_deps.augmented_env(), **_deps.subprocess_kwargs(),
         ).stdout
         return json.loads(out) if out.strip() else []
     except subprocess.CalledProcessError as e:
@@ -355,8 +355,8 @@ def gh_login(cfg: dict) -> str:
     try:
         out = subprocess.run(
             [_deps.gh_path(), "api", "user", "--jq", ".login"],
-            check=True, capture_output=True, text=True, timeout=30,
-            env=_deps.augmented_env(),
+            check=True, capture_output=True, timeout=30,
+            env=_deps.augmented_env(), **_deps.subprocess_kwargs(),
         ).stdout.strip()
         return out
     except Exception:  # noqa: BLE001

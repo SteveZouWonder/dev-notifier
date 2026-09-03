@@ -32,15 +32,51 @@ from platform_backend.base import MenuItem, TrayBackend, Timer
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE_NAME = "DevNotifier"
 
+# Inno Setup registers the install under this key (AppId + "_is1"); the AppId
+# must match packaging/windows_installer.iss. ``InstallLocation`` is the
+# directory the installer copied DevNotifier.exe into.
+INSTALLER_APP_ID = "{AC9E7F69-2E11-4EC9-B42F-F024C0BE764A}"
+UNINSTALL_KEY = (r"Software\Microsoft\Windows\CurrentVersion\Uninstall"
+                 f"\\{INSTALLER_APP_ID}_is1")
+APP_EXE_NAME = "DevNotifier.exe"
+
+
+def _installed_exe():
+    """Path of the exe the Inno Setup installer put in place, or ``None``.
+
+    Looks up ``InstallLocation`` under the per-user, then all-users, uninstall
+    key. Returns ``None`` when the app was never installed (portable exe or
+    source run) or the recorded exe no longer exists.
+    """
+    try:
+        import winreg
+    except ImportError:  # not Windows (tests on macOS/Linux without the stub)
+        return None
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        try:
+            with winreg.OpenKey(hive, UNINSTALL_KEY) as key:
+                location, _ = winreg.QueryValueEx(key, "InstallLocation")
+        except OSError:
+            continue
+        if not location:
+            continue
+        exe = Path(str(location)) / APP_EXE_NAME
+        if exe.is_file():
+            return str(exe)
+    return None
+
 
 def _launch_command() -> str:
     """Command string Windows runs at login to (re)start the app.
 
-    Frozen (PyInstaller ``.exe``): just the executable path, quoted.
+    Frozen (PyInstaller ``.exe``): the *installed* executable when the Inno
+    Setup installer registered one (a portable exe launched from Downloads must
+    not pin start-at-login to a path that vanishes when the file is moved or
+    deleted); otherwise the running executable. Quoted.
     From source: the current interpreter running ``launcher.py``, both quoted.
     """
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
+        return f'"{_installed_exe() or sys.executable}"'
     launcher = Path(__file__).resolve().parent.parent.parent / "launcher.py"
     return f'"{sys.executable}" "{launcher}"'
 

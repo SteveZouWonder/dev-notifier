@@ -94,20 +94,48 @@ jobs:
           pip install -r requirements-build.txt
 
       - name: Build with PyInstaller
+        # The spec stamps APP_VERSION into the bundle (sys._MEIPASS/APP_VERSION)
+        # and the exe's VERSIONINFO resource; the in-app updater reads the stamp,
+        # so this env var is what makes the Windows build know its own version.
         env:
           APP_VERSION: ${{ needs.prepare.outputs.version }}
         run: pyinstaller packaging/dev-notifier-win.spec --noconfirm
 
-      - name: Package (rename to versioned asset)
+      - name: Package (Inno Setup installer + portable exe)
+        # Produces dist/DevNotifier-<ver>-setup.exe (installer; the updater's
+        # preferred asset) and dist/DevNotifier-<ver>-portable.exe. Inno Setup 6
+        # is preinstalled on windows-latest; fall back to winget if it is not.
         env:
           APP_VERSION: ${{ needs.prepare.outputs.version }}
-        run: pwsh packaging/windows_package.ps1
+        run: |
+          if (-not (Get-Command ISCC.exe -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            Write-Host "Inno Setup not found; installing via winget"
+            winget install --id JRSoftware.InnoSetup -e --silent --accept-source-agreements --accept-package-agreements
+          }
+          pwsh packaging/windows_package.ps1
+
+      - name: Verify bundled version stamp
+        # Guard against regressing to a build that does not know its version.
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          $stamp = (Get-Content build/APP_VERSION -Raw).Trim()
+          if ($stamp -ne $env:APP_VERSION) {
+            Write-Error "APP_VERSION stamp '$stamp' != '$env:APP_VERSION'"
+            exit 1
+          }
+          Get-ChildItem dist/*.exe | ForEach-Object {
+            "$($_.Name)  FileVersion=$($_.VersionInfo.FileVersion)"
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: DevNotifier-windows
-          path: dist/*.exe
+          path: |
+            dist/*-setup.exe
+            dist/*-portable.exe
 
   release:
     needs: [prepare, build-macos, build-windows]
