@@ -106,10 +106,14 @@ usually only need three Jira values:
 - **GitHub** *(on by default)*: no token needed — it uses the
   [`gh` CLI](https://cli.github.com). Run `gh auth login` once, or set
   `"enabled": false` under `github` to turn it off.
-- **PagerDuty** *(off by default)*: set `"enabled": true` and paste a **User API
-  token** into `api_token`. On‑call reminders and team incident events are on by
-  default; see the Tutorial for `oncall_reminders`, `notify_team_incidents`,
-  `low_urgency_sound` and friends.
+- **PagerDuty** *(off by default)*: set `"enabled": true` and paste a personal
+  **User API token** into `api_token` — create it under your avatar →
+  **My Profile → User Settings → API Access → Create API User Token**
+  (`https://<your-subdomain>.pagerduty.com/users/<your-user-id>`; not an
+  admin *General Access* key). Step‑by‑step instructions:
+  [Tutorial → PagerDuty](TUTORIAL.md#pagerduty). On‑call reminders and team
+  incident events are on by default; see the Tutorial for `oncall_reminders`,
+  `notify_team_incidents`, `low_urgency_sound` and friends.
 
 After editing, save and click **Check dependencies** in the menu. The config
 file stays on your machine and is never committed. For a step‑by‑step walkthrough

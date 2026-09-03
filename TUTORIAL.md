@@ -157,17 +157,68 @@ in the config file.
 
 ### PagerDuty
 
-1. In PagerDuty, go to your avatar → **My Profile → User Settings → API
-   Access → Create API User Token**. Copy the token (shown once).
-2. Click the icon → **Open config file**. Under `"pagerduty"`, set
-   `"enabled": true` and paste the token into `"api_token"`. Save.
-3. Click **Check dependencies** — PagerDuty should show ✓.
+Dev Notifier needs a **personal User API Token** — a key tied to *your* user,
+so it can ask PagerDuty "which incidents are assigned to *me*, when am *I*
+on‑call". Any PagerDuty user can create one; no admin rights needed.
+
+> Don't use a **General Access REST API key** (the ones under *Integrations →
+> Developer Tools → API Access Keys*, `https://<your-subdomain>.pagerduty.com/api_keys`).
+> Those are account‑wide, need an Admin to create, and have no notion of "me",
+> so the app cannot tell which incidents or shifts are yours.
+
+**Step 1 — Open your User Settings**
+
+1. Sign in to PagerDuty in your browser. Note the address: it looks like
+   `https://<your-subdomain>.pagerduty.com/…` (e.g. `acme.pagerduty.com`).
+2. Click your **avatar** (top‑right) → **My Profile**. The address becomes
+   `https://<your-subdomain>.pagerduty.com/users/<YOUR-USER-ID>` — the ID is a
+   short code starting with `P`, e.g. `PABC123`.
+3. Click the **User Settings** tab. Direct link, once you know both values:
+
+   ```
+   https://<your-subdomain>.pagerduty.com/users/<YOUR-USER-ID>
+   ```
+   → **User Settings** tab → scroll to **API Access**.
+
+   Official guide: <https://support.pagerduty.com/main/docs/api-access-keys#generate-a-user-token-rest-api-key>
+
+**Step 2 — Create the token**
+
+1. Under **API Access**, click **Create API User Token**.
+2. Enter a **Description** such as `dev-notifier` (so you can recognise — and
+   later revoke — it), then click **Create Key**.
+3. **Copy the 20‑character key now.** PagerDuty shows it only once; if you lose
+   it, delete it and create a new one. Click **Close**.
+
+**Step 3 — Put it in Dev Notifier**
+
+1. Click the lightning‑bolt icon → **Open config file**.
+2. Under `"pagerduty"`, set `"enabled": true` and paste the key into
+   `"api_token"`:
+   ```json
+   "pagerduty": {
+     "enabled": true,
+     "api_token": "u+AbCdEfGhIjKlMnOpQr"
+   }
+   ```
+3. **Save** the file, then click **Check dependencies** — the Status menu
+   should show **PagerDuty: ✓ Ready**.
+4. Click **Check now**. If the key is wrong or was revoked, Status shows
+   `PagerDuty: ⚠ HTTP 401 unauthorized` and a ⚠ appears next to the icon;
+   otherwise **PagerDuty ▸** fills in with your on‑call state.
 
 Your teams and user ID are detected automatically from the token. You'll be
 notified about incidents on your teams and anything assigned to you, and get a
 heads‑up **1 day** and **1 hour** before each on‑call shift (plus when it starts
 and ends). Low‑urgency incidents notify silently. To change any of this, see the
 `pagerduty.*` rows under [Advanced config fields](#advanced-config-fields).
+
+> **EU accounts** (`https://<subdomain>.eu.pagerduty.com`) are not supported
+> yet — the app talks to the US API host. Status will show
+> `PagerDuty: ⚠ HTTP 401` for an EU token.
+
+To revoke the token later: same **User Settings → API Access** page →
+**Remove** next to `dev-notifier`.
 
 ---
 
@@ -249,8 +300,16 @@ notification appears.
   [GitHub](#github) above, then click **Check dependencies**.
 
 **Status shows "PagerDuty: Needs token"**
-- You turned PagerDuty on but didn't paste a token. Add one (see
-  [PagerDuty](#pagerduty)) or set `"enabled": false` to turn it back off.
+- You turned PagerDuty on but didn't paste a token. Create one (step‑by‑step
+  in [PagerDuty](#pagerduty)) or set `"enabled": false` to turn it back off.
+
+**Status shows "PagerDuty: ⚠ HTTP 401" although I pasted a token**
+- The token was revoked, mistyped, or is a *General Access* key instead of a
+  personal *User Token* — or your account is on the EU region
+  (`*.eu.pagerduty.com`, not yet supported). Create a **User Token** under
+  your avatar → **My Profile → User Settings → API Access** (see
+  [PagerDuty](#pagerduty)), paste it, save, **Check dependencies**, **Check
+  now**.
 
 **PagerDuty menu says I'm on‑call but PagerDuty shows someone else**
 - Open **PagerDuty ▸**: each line is one escalation level you sit on.
