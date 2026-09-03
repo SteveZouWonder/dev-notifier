@@ -81,8 +81,12 @@ save, and click **Check dependencies** again.
 - **GitHub** *(optional)* — review requests, mentions, assignments, and activity
   on your own pull requests. Plus a heads‑up when your PR's checks **fail** or
   are **pending**.
-- **PagerDuty** *(optional)* — incidents assigned to you or your teams, and when
-  their status changes (acknowledge → resolve → escalate).
+- **PagerDuty** *(optional)* — incidents assigned to you or your teams: when
+  they're triggered, acknowledged, escalated or reassigned **to you**, resolved,
+  get a note, change priority, or someone requests you as a responder — each
+  notification says who did it. You also get on‑call shift reminders (a day and
+  an hour before, at the start, and at the end), and the menu shows whether
+  you're on‑call right now and your open incidents.
 
 Click any notification to open it in your browser. You can also reopen recent
 items from the **Recent** menu.
@@ -97,6 +101,7 @@ Click (macOS) or right‑click (Windows) the icon:
 |------|--------------|
 | **Check now** | Check right away instead of waiting for the timer |
 | **Status** | Shows whether Jira / GitHub / PagerDuty are ready |
+| **PagerDuty** | *(when enabled)* On‑call now / next shift, and your open incidents — click one to open it |
 | **Recent** | The last items seen — reopen or remove them |
 | **Clear all recent** | Empty the recent list |
 | **Theme** | Change the icon color |
@@ -133,7 +138,11 @@ in the config file.
    `"enabled": true` and paste the token into `"api_token"`. Save.
 3. Click **Check dependencies** — PagerDuty should show ✓.
 
-Your teams and user ID are detected automatically from the token.
+Your teams and user ID are detected automatically from the token. You'll be
+notified about incidents on your teams and anything assigned to you, and get a
+heads‑up **1 day** and **1 hour** before each on‑call shift (plus when it starts
+and ends). Low‑urgency incidents notify silently. To change any of this, see the
+`pagerduty.*` rows under [Advanced config fields](#advanced-config-fields).
 
 ---
 
@@ -168,6 +177,12 @@ system‑wide, and it only affects your own user account.
 **Status shows "PagerDuty: Needs token"**
 - You turned PagerDuty on but didn't paste a token. Add one (see
   [PagerDuty](#pagerduty)) or set `"enabled": false` to turn it back off.
+
+**Too many PagerDuty notifications**
+- Add `"notify_team_incidents": false` under `"pagerduty"` to only hear about
+  incidents assigned to you (and escalations / responder requests aimed at you).
+- Add `"oncall_reminders": false` to turn off shift reminders, or shorten
+  `"oncall_remind_before_minutes"` (e.g. `[60]` for just a one‑hour heads‑up).
 
 **Clicking a notification doesn't open anything**
 - Make sure you allowed notifications the first time. On Windows, also make sure
@@ -228,7 +243,12 @@ behaviour:
 | `jira.event_mode` | `true` | One notification per change/comment vs. per issue |
 | `jira.event_fields` | `["status","assignee"]` | Which Jira field changes notify you |
 | `github.login` | `""` | Leave blank to auto‑detect via `gh api user` |
+| `jira.suppress_self` / `github.suppress_self` / `pagerduty.suppress_self` | `true` | Hide things you did yourself (your own comments, acks, resolves…) |
 | `pagerduty.user_id` / `team_ids` | auto | Leave blank to auto‑detect |
+| `pagerduty.notify_team_incidents` | `true` | Also notify about your teams' incidents, not just ones assigned to you |
+| `pagerduty.low_urgency_sound` | `false` | Play a sound for low‑urgency incidents too (they're silent by default) |
+| `pagerduty.oncall_reminders` | `true` | Notify before / at the start / at the end of your on‑call shifts |
+| `pagerduty.oncall_remind_before_minutes` | `[1440, 60]` | How long before a shift to send a heads‑up (minutes; one per entry) |
 | `update.enabled` | `true` | Auto‑check GitHub Releases for a newer version |
 | `update.check_interval_hours` | `24` | How often to check for a newer version (hours) |
 | `update.skipped_version` | `""` | App‑managed. Set by **Skip this version**; normally you don't edit it |
@@ -250,17 +270,24 @@ comments, so the meaning of each field is in the table above.)
     "username": "you@example.com",
     "api_token": "",
     "event_mode": true,
-    "event_fields": ["status", "assignee"]
+    "event_fields": ["status", "assignee"],
+    "suppress_self": true
   },
   "github": {
     "enabled": true,
-    "login": ""
+    "login": "",
+    "suppress_self": true
   },
   "pagerduty": {
     "enabled": false,
     "api_token": "",
     "user_id": "",
-    "team_ids": []
+    "team_ids": [],
+    "suppress_self": true,
+    "notify_team_incidents": true,
+    "low_urgency_sound": false,
+    "oncall_reminders": true,
+    "oncall_remind_before_minutes": [1440, 60]
   },
   "poll": {
     "interval_seconds": 300,

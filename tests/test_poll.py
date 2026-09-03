@@ -1,4 +1,4 @@
-"""Tests for src/poll.py — Jira/GitHub item collection.
+"""Tests for src/poll.py — Jira/GitHub/PagerDuty item collection.
 
 Network (urllib) and the gh CLI (subprocess) are mocked so no real calls occur.
 
@@ -873,7 +873,7 @@ def test_collect_all_returns_phases(poll_mod, monkeypatch, sample_cfg):
     monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: ["g"])
     monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: ["c"])
     monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
-    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: ["p"])
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w, status=None: ["p"])
 
     phases = poll_mod.collect_all(sample_cfg)
     assert phases == [("jira", ["j"]), ("github", ["g"]), ("ci", ["c"]),
@@ -885,7 +885,7 @@ def test_collect_all_wires_custom_logger(poll_mod, monkeypatch, sample_cfg):
     monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: [])
     monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
     monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
-    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: [])
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w, status=None: [])
 
     captured = []
     poll_mod.collect_all(sample_cfg, log=captured.append)
@@ -901,7 +901,7 @@ def test_collect_all_passes_dynamic_window(poll_mod, monkeypatch, sample_cfg):
     monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: [])
     monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
     monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
-    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w: seen.setdefault("pd", w) or [])
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w, status=None: seen.setdefault("pd", w) or [])
 
     import time
     poll_mod.collect_all(sample_cfg, since_ts=time.time() - 25 * 60)
@@ -985,18 +985,88 @@ def test_gh_ci_fallback_collects_rollups(poll_mod, monkeypatch, sample_cfg):
 # PagerDuty
 # ---------------------------------------------------------------------------
 
-def _pd_incident(iid="PINC1", num=42, status="triggered",
-                 changed="2026-07-01T00:00:00Z", title="Disk full",
-                 service="prod-api", html_url="https://acme.pagerduty.com/incidents/PINC1"):
-    return {
+def _pd_incident(iid="PINC1", num=42, status="triggered", title="Disk full",
+                 service="prod-api", urgency="high", teams=("PTEAM1",),
+                 resolved_at=None,
+                 html_url="https://acme.pagerduty.com/incidents/PINC1"):
+    inc = {
         "id": iid,
         "incident_number": num,
         "status": status,
-        "last_status_change_at": changed,
-        "service": {"summary": service},
+        "urgency": urgency,
+        "service": {"summary": service} if service else {},
+        "teams": [{"id": t, "type": "team_reference"} for t in teams],
         "title": title,
         "html_url": html_url,
     }
+    if resolved_at:
+        inc["resolved_at"] = resolved_at
+    return inc
+
+
+def _pd_entry(eid, etype, incident, created=None, agent=None, assignees=None,
+              channel=None, summary=None, **extra):
+    e = {
+        "id": eid,
+        "type": etype,
+        "created_at": created or _recent_iso(2),
+        "incident": incident,
+        "agent": agent if agent is not None
+        else {"id": "PSVC", "type": "service_reference", "summary": "prod-api"},
+    }
+    if assignees is not None:
+        e["assignees"] = assignees
+    if channel is not None:
+        e["channel"] = channel
+    if summary is not None:
+        e["summary"] = summary
+    e.update(extra)
+    return e
+
+
+def _user(uid, name="Bob"):
+    return {"id": uid, "type": "user_reference", "summary": name}
+
+
+ME = _user("PUSER1", "Me Myself")
+BOB = _user("PBOB", "Bob")
+ALICE = _user("PALICE", "Alice")
+
+
+def _has(params, key, value=None):
+    return any(k == key and (value is None or v == value) for k, v in params)
+
+
+def _pd_router(poll_mod, monkeypatch, team_entries=(), mine_active=(),
+               mine_resolved=(), per_incident=None, oncalls=(), me=None):
+    """Install a fake ``_pd_get`` that answers by endpoint; returns the call log."""
+    calls = []
+    per_incident = per_incident or {}
+
+    def fake_get(token, path, params=None):
+        params = list(params or [])
+        calls.append((path, params))
+        if path == "/users/me":
+            return {"user": me} if me is not None else {}
+        if path == "/log_entries":
+            return {"log_entries": list(team_entries), "more": False}
+        if path.startswith("/incidents/") and path.endswith("/log_entries"):
+            iid = path.split("/")[2]
+            return {"log_entries": list(per_incident.get(iid, [])), "more": False}
+        if path == "/incidents":
+            if _has(params, "statuses[]", "resolved"):
+                return {"incidents": list(mine_resolved), "more": False}
+            return {"incidents": list(mine_active), "more": False}
+        if path == "/oncalls":
+            return {"oncalls": list(oncalls), "more": False}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
+    return calls
+
+
+def _incident_items(items):
+    return [it for it in items if not it["message"].startswith("[on-call]")]
 
 
 def test_pagerduty_items_disabled_returns_empty(poll_mod):
@@ -1008,128 +1078,7 @@ def test_pagerduty_items_no_token_returns_empty(poll_mod):
     assert poll_mod.pagerduty_items(cfg, 10) == []
 
 
-def test_pagerduty_items_builds_assigned_and_team(poll_mod, monkeypatch, sample_cfg):
-    calls = []
-
-    def fake_get(token, path, params=None):
-        calls.append(params)
-        # First call = assigned-to-me (user_ids[]); second = team.
-        if any(k == "user_ids[]" for k, _ in (params or [])):
-            return {"incidents": [_pd_incident(iid="PINC1", num=1,
-                                               status="triggered")]}
-        return {"incidents": [
-            _pd_incident(iid="PINC1", num=1, status="triggered"),  # dup, skipped
-            _pd_incident(iid="PINC2", num=2, status="acknowledged",
-                         title="CPU high"),
-        ]}
-
-    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
-    items = poll_mod.pagerduty_items(sample_cfg, 10)
-
-    assert len(items) == 2  # PINC1 assigned + PINC2 team (PINC1 dup skipped)
-    assigned = items[0]
-    assert assigned["title"] == "PagerDuty"
-    assert assigned["subtitle"] == "#1 · triggered · prod-api"
-    assert assigned["message"] == "[assigned to you] Disk full"
-    assert assigned["fp"] == "pd:PINC1:2026-07-01T00:00:00Z"
-    assert assigned["url"] == "https://acme.pagerduty.com/incidents/PINC1"
-    assert items[1]["message"] == "[team incident] CPU high"
-
-
-def test_pagerduty_items_no_service_summary(poll_mod, monkeypatch, sample_cfg):
-    inc = _pd_incident(service="")
-    monkeypatch.setattr(poll_mod, "_pd_get",
-                        lambda t, p, params=None: {"incidents": [inc]}
-                        if any(k == "user_ids[]" for k, _ in (params or []))
-                        else {"incidents": []})
-    items = poll_mod.pagerduty_items(sample_cfg, 10)
-    assert items[0]["subtitle"] == "#42 · triggered"  # no trailing service
-
-
-def test_pagerduty_items_only_teams_when_no_user_id(poll_mod, monkeypatch):
-    cfg = {"pagerduty": {"enabled": True, "api_token": "tok",
-                         "user_id": "", "team_ids": ["PTEAM1"]}}
-    seen = {"user": False}
-
-    def fake_get(token, path, params=None):
-        if any(k == "user_ids[]" for k, _ in (params or [])):
-            seen["user"] = True
-            return {"incidents": []}
-        return {"incidents": [_pd_incident(iid="PT1", num=9,
-                                           status="triggered")]}
-
-    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
-    items = poll_mod.pagerduty_items(cfg, 10)
-    # user_id empty -> no assigned query issued; only the team item remains.
-    assert seen["user"] is False
-    assert len(items) == 1
-    assert items[0]["message"].startswith("[team incident]")
-
-
-def test_pagerduty_items_suppresses_own_status_change(poll_mod, monkeypatch,
-                                                      sample_cfg):
-    # A team incident whose last status change was made by me is dropped.
-    inc = _pd_incident(iid="PT1", num=9, status="acknowledged")
-    inc["last_status_change_by"] = {"id": "PUSER1"}  # == sample_cfg user_id
-
-    def fake_get(token, path, params=None):
-        if any(k == "user_ids[]" for k, _ in (params or [])):
-            return {"incidents": []}
-        return {"incidents": [inc]}
-
-    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
-    assert poll_mod.pagerduty_items(sample_cfg, 10) == []
-
-
-def test_pagerduty_items_keeps_others_status_change(poll_mod, monkeypatch,
-                                                    sample_cfg):
-    inc = _pd_incident(iid="PT1", num=9, status="acknowledged")
-    inc["last_status_change_by"] = {"id": "SOMEONE_ELSE"}
-
-    def fake_get(token, path, params=None):
-        if any(k == "user_ids[]" for k, _ in (params or [])):
-            return {"incidents": []}
-        return {"incidents": [inc]}
-
-    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
-    items = poll_mod.pagerduty_items(sample_cfg, 10)
-    assert len(items) == 1
-    assert items[0]["message"].startswith("[team incident]")
-
-
-def test_pagerduty_items_suppress_self_disabled_keeps_own(poll_mod, monkeypatch,
-                                                          sample_cfg):
-    sample_cfg["pagerduty"]["suppress_self"] = False
-    inc = _pd_incident(iid="PT1", num=9, status="acknowledged")
-    inc["last_status_change_by"] = {"id": "PUSER1"}
-
-    def fake_get(token, path, params=None):
-        if any(k == "user_ids[]" for k, _ in (params or [])):
-            return {"incidents": []}
-        return {"incidents": [inc]}
-
-    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
-    assert len(poll_mod.pagerduty_items(sample_cfg, 10)) == 1
-
-
-def test_pd_identity_uses_configured_values(poll_mod, sample_cfg):
-    # Both user_id and team_ids present -> no network call.
-    assert poll_mod.pd_identity(sample_cfg) == ("PUSER1", ["PTEAM1"])
-
-
-def test_pd_identity_no_token_returns_configured(poll_mod):
-    cfg = {"pagerduty": {"enabled": True, "api_token": "",
-                         "user_id": "", "team_ids": []}}
-    assert poll_mod.pd_identity(cfg) == ("", [])
-
-
-def test_pd_identity_autodetects_via_users_me(poll_mod, monkeypatch):
-    cfg = {"pagerduty": {"enabled": True, "api_token": "tok",
-                         "user_id": "", "team_ids": []}}
-    monkeypatch.setattr(poll_mod, "_pd_get", lambda t, p, params=None: {
-        "user": {"id": "PME", "teams": [{"id": "PTX"}, {"id": ""}]}})
-    assert poll_mod.pd_identity(cfg) == ("PME", ["PTX"])
-
+# -- _pd_get / pagination ---------------------------------------------------
 
 def test_pd_get_parses_json(poll_mod, monkeypatch):
     payload = json.dumps({"user": {"id": "PME"}}).encode()
@@ -1164,12 +1113,14 @@ def test_pd_get_with_params_builds_query(poll_mod, monkeypatch):
 
     def fake_urlopen(req, *a, **k):
         captured["url"] = req.full_url
+        captured["auth"] = req.get_header("Authorization")
         return FakeResp()
 
     monkeypatch.setattr(poll_mod.urllib.request, "urlopen", fake_urlopen)
     poll_mod._pd_get("tok", "/incidents", [("user_ids[]", "P1"), ("limit", "5")])
     assert "user_ids%5B%5D=P1" in captured["url"]
     assert captured["url"].startswith("https://api.pagerduty.com/incidents?")
+    assert captured["auth"] == "Token token=tok"
 
 
 def test_pd_get_swallows_network_error(poll_mod, monkeypatch):
@@ -1179,6 +1130,588 @@ def test_pd_get_swallows_network_error(poll_mod, monkeypatch):
     monkeypatch.setattr(poll_mod, "_log", lambda m: None)
     monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
     assert poll_mod._pd_get("tok", "/users/me") == {}
+
+
+def test_pd_get_all_follows_pagination(poll_mod, monkeypatch):
+    calls = []
+
+    def fake_get(token, path, params=None):
+        calls.append(dict(params))
+        offset = int(dict(params)["offset"])
+        if offset == 0:
+            return {"incidents": [{"id": "A"}], "more": True}
+        return {"incidents": [{"id": "B"}], "more": False}
+
+    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
+    out = poll_mod._pd_get_all("tok", "/incidents", [("x", "1")], "incidents")
+    assert [i["id"] for i in out] == ["A", "B"]
+    assert [c["offset"] for c in calls] == ["0", str(poll_mod._PD_PAGE_SIZE)]
+    assert all(c["x"] == "1" and c["limit"] == str(poll_mod._PD_PAGE_SIZE)
+               for c in calls)
+
+
+def test_pd_get_all_respects_max_pages(poll_mod, monkeypatch):
+    monkeypatch.setattr(poll_mod, "_pd_get",
+                        lambda t, p, params=None: {"incidents": [{"id": "X"}],
+                                                   "more": True})
+    out = poll_mod._pd_get_all("tok", "/incidents", [], "incidents", max_pages=3)
+    assert len(out) == 3  # stopped after 3 pages even though more=True
+
+
+def test_pd_get_all_handles_empty_response(poll_mod, monkeypatch):
+    monkeypatch.setattr(poll_mod, "_pd_get", lambda t, p, params=None: {})
+    assert poll_mod._pd_get_all("tok", "/incidents", [], "incidents") == []
+
+
+# -- identity / profile -----------------------------------------------------
+
+def test_pd_identity_uses_configured_values(poll_mod, sample_cfg):
+    # Both user_id and team_ids present -> no network call.
+    assert poll_mod.pd_identity(sample_cfg) == ("PUSER1", ["PTEAM1"])
+
+
+def test_pd_identity_no_token_returns_configured(poll_mod):
+    cfg = {"pagerduty": {"enabled": True, "api_token": "",
+                         "user_id": "", "team_ids": []}}
+    assert poll_mod.pd_identity(cfg) == ("", [])
+
+
+def test_pd_identity_autodetects_via_users_me(poll_mod, monkeypatch):
+    cfg = {"pagerduty": {"enabled": True, "api_token": "tok",
+                         "user_id": "", "team_ids": []}}
+    monkeypatch.setattr(poll_mod, "_pd_get", lambda t, p, params=None: {
+        "user": {"id": "PME", "teams": [{"id": "PTX"}, {"id": ""}]}})
+    assert poll_mod.pd_identity(cfg) == ("PME", ["PTX"])
+
+
+def test_pd_profile_caches_users_me(poll_mod, monkeypatch):
+    cfg = {"pagerduty": {"enabled": True, "api_token": "tok",
+                         "user_id": "", "team_ids": []}}
+    calls = []
+
+    def fake_get(t, p, params=None):
+        calls.append(p)
+        return {"user": {"id": "PME", "name": "Me", "email": "me@acme.com",
+                         "teams": [{"id": "PTX"}]}}
+
+    monkeypatch.setattr(poll_mod, "_pd_get", fake_get)
+    p1 = poll_mod.pd_profile(cfg, now_ts=1000.0)
+    p2 = poll_mod.pd_profile(cfg, now_ts=1000.0 + 60)
+    assert p1 == {"user_id": "PME", "team_ids": ["PTX"], "name": "Me",
+                  "email": "me@acme.com"}
+    assert p2 == p1
+    assert calls == ["/users/me"]  # second call served from cache
+    # After the TTL the profile is refreshed.
+    poll_mod.pd_profile(cfg, now_ts=1000.0 + poll_mod._PD_PROFILE_TTL_S + 1)
+    assert calls == ["/users/me", "/users/me"]
+
+
+def test_pd_profile_does_not_cache_failures(poll_mod, monkeypatch):
+    cfg = {"pagerduty": {"enabled": True, "api_token": "tok"}}
+    calls = []
+    monkeypatch.setattr(poll_mod, "_pd_get",
+                        lambda t, p, params=None: calls.append(p) or {})
+    poll_mod.pd_profile(cfg, now_ts=1.0)
+    poll_mod.pd_profile(cfg, now_ts=2.0)
+    assert calls == ["/users/me", "/users/me"]
+
+
+def test_pd_profile_prefers_configured_ids(poll_mod, monkeypatch, sample_cfg):
+    monkeypatch.setattr(poll_mod, "_pd_get", lambda t, p, params=None: {
+        "user": {"id": "OTHER", "name": "Me", "teams": [{"id": "PTZ"}]}})
+    prof = poll_mod.pd_profile(sample_cfg)
+    assert prof["user_id"] == "PUSER1" and prof["team_ids"] == ["PTEAM1"]
+    assert prof["name"] == "Me"
+
+
+def test_pd_profile_no_token(poll_mod):
+    prof = poll_mod.pd_profile({"pagerduty": {"user_id": "X"}})
+    assert prof == {"user_id": "X", "team_ids": [], "name": "", "email": ""}
+
+
+def test_pd_profile_uses_real_clock_by_default(poll_mod, monkeypatch):
+    cfg = {"pagerduty": {"api_token": "tok"}}
+    monkeypatch.setattr(poll_mod, "_pd_get",
+                        lambda t, p, params=None: {"user": {"id": "PME"}})
+    assert poll_mod.pd_profile(cfg)["user_id"] == "PME"
+    assert "tok" in poll_mod._pd_profile_cache
+
+
+# -- incident timeline events ----------------------------------------------
+
+def test_pagerduty_team_timeline_events(poll_mod, monkeypatch, sample_cfg):
+    inc = _pd_incident(iid="PT1", num=7, status="acknowledged", title="CPU high")
+    entries = [
+        _pd_entry("E1", "trigger_log_entry", inc, created=_recent_iso(5)),
+        _pd_entry("E2", "acknowledge_log_entry", inc, created=_recent_iso(3),
+                  agent=BOB),
+        _pd_entry("E3", "notify_log_entry", inc),  # ignored type
+    ]
+    calls = _pd_router(poll_mod, monkeypatch, team_entries=entries)
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+
+    assert [it["fp"] for it in items] == ["pd:PT1:E1", "pd:PT1:E2"]
+    assert items[0]["title"] == "PagerDuty"
+    assert items[0]["subtitle"] == "#7 · acknowledged · prod-api"
+    assert items[0]["message"] == "[team incident] triggered — CPU high"
+    assert items[1]["message"] == "[team incident] acknowledged by Bob — CPU high"
+    assert items[0]["url"] == "https://acme.pagerduty.com/incidents/PINC1"
+    assert items[0]["sound"] is True
+    # The team timeline is queried with the window + team filter + incidents.
+    path, params = next(c for c in calls if c[0] == "/log_entries")
+    assert _has(params, "team_ids[]", "PTEAM1")
+    assert _has(params, "include[]", "incidents")
+    assert _has(params, "since") and _has(params, "until")
+
+
+def test_pagerduty_suppresses_own_actions_everywhere(poll_mod, monkeypatch,
+                                                     sample_cfg):
+    mine = _pd_incident(iid="PM1", num=1, teams=())
+    team = _pd_incident(iid="PT1", num=2)
+    _pd_router(poll_mod, monkeypatch,
+               team_entries=[_pd_entry("E1", "resolve_log_entry", team, agent=ME)],
+               mine_active=[mine],
+               per_incident={"PM1": [_pd_entry("E2", "acknowledge_log_entry",
+                                               mine, agent=ME)]})
+    # Both my ack on my own incident and my resolve on a team incident are hidden.
+    assert _incident_items(poll_mod.pagerduty_items(sample_cfg, 10)) == []
+
+
+def test_pagerduty_suppress_self_disabled_keeps_own(poll_mod, monkeypatch,
+                                                    sample_cfg):
+    sample_cfg["pagerduty"]["suppress_self"] = False
+    team = _pd_incident(iid="PT1", num=2)
+    _pd_router(poll_mod, monkeypatch,
+               team_entries=[_pd_entry("E1", "resolve_log_entry", team, agent=ME)])
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert items[0]["message"] == "[team incident] resolved by Me Myself — Disk full"
+
+
+def test_pagerduty_escalated_to_me_is_assigned_to_you(poll_mod, monkeypatch,
+                                                      sample_cfg):
+    inc = _pd_incident(iid="PT1", num=3)
+    entries = [_pd_entry("E1", "escalate_log_entry", inc, assignees=[ME, ALICE],
+                         agent=BOB)]
+    _pd_router(poll_mod, monkeypatch, team_entries=entries)
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert items[0]["message"] == \
+        "[assigned to you] escalated to you, Alice by Bob — Disk full"
+
+
+def test_pagerduty_reassigned_away_on_my_incident(poll_mod, monkeypatch,
+                                                  sample_cfg):
+    mine = _pd_incident(iid="PM1", num=4)  # on my team, assigned to me
+    entries = [_pd_entry("E1", "reassign_log_entry", mine, assignees=[ALICE],
+                         agent=BOB)]
+    _pd_router(poll_mod, monkeypatch, team_entries=entries, mine_active=[mine])
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert items[0]["message"] == \
+        "[your incident] reassigned to Alice by Bob — Disk full"
+
+
+def test_pagerduty_collapses_trigger_and_initial_assign(poll_mod, monkeypatch,
+                                                        sample_cfg):
+    inc = _pd_incident(iid="PT1", num=5)
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=2)
+    entries = [
+        _pd_entry("E1", "trigger_log_entry", inc, created=t0.isoformat()),
+        _pd_entry("E2", "assign_log_entry", inc, assignees=[ME],
+                  created=(t0 + timedelta(seconds=1)).isoformat()),
+    ]
+    _pd_router(poll_mod, monkeypatch, team_entries=entries)
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    # One notification, not two — and it says it landed on you.
+    assert len(items) == 1
+    assert items[0]["fp"] == "pd:PT1:E1"
+    assert items[0]["message"] == \
+        "[assigned to you] triggered, assigned to you — Disk full"
+
+
+def test_pagerduty_late_assign_is_not_collapsed(poll_mod, monkeypatch,
+                                                sample_cfg):
+    inc = _pd_incident(iid="PT1", num=5)
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=5)
+    entries = [
+        _pd_entry("E1", "trigger_log_entry", inc, created=t0.isoformat()),
+        _pd_entry("E2", "assign_log_entry", inc, assignees=[BOB], agent=ALICE,
+                  created=(t0 + timedelta(minutes=1)).isoformat()),
+    ]
+    _pd_router(poll_mod, monkeypatch, team_entries=entries)
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert [it["fp"] for it in items] == ["pd:PT1:E1", "pd:PT1:E2"]
+    assert items[1]["message"] == \
+        "[team incident] assigned to Bob by Alice — Disk full"
+
+
+def test_pd_collapse_ignores_unparseable_timestamps(poll_mod):
+    inc = {"id": "X"}
+    entries = [
+        _pd_entry("E1", "trigger_log_entry", inc, created="garbage"),
+        _pd_entry("E2", "assign_log_entry", inc, created="garbage"),
+        _pd_entry("E3", "assign_log_entry", {"id": "OTHER"}),  # no trigger
+    ]
+    out = poll_mod._pd_collapse_trigger_assign(entries)
+    assert [e["id"] for e in out] == ["E1", "E2", "E3"]
+
+
+def test_pagerduty_responder_request_to_me(poll_mod, monkeypatch, sample_cfg):
+    inc = _pd_incident(iid="PT1", num=6)
+    entries = [_pd_entry("E1", "responder_request_log_entry", inc, agent=BOB,
+                         responders=[{"user": ME}])]
+    _pd_router(poll_mod, monkeypatch, team_entries=entries)
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert items[0]["message"] == \
+        "[responder requested] you were requested as a responder by Bob — Disk full"
+
+
+def test_pd_targets_collects_all_shapes(poll_mod):
+    entry = {"assignees": [BOB, "junk"], "responders": [{"user": ALICE}],
+             "responder": {"user": ME}}
+    ids = [t["id"] for t in poll_mod._pd_targets(entry)]
+    assert ids == ["PBOB", "PALICE", "PUSER1"]
+    assert poll_mod._pd_targets({"responder": BOB})[0]["id"] == "PBOB"
+
+
+def test_pagerduty_note_mentioning_me(poll_mod, monkeypatch, sample_cfg):
+    inc = _pd_incident(iid="PT1", num=8)
+    entries = [
+        _pd_entry("E1", "annotate_log_entry", inc, agent=BOB,
+                  channel={"type": "note", "summary": "Me Myself please look"}),
+        _pd_entry("E2", "annotate_log_entry", inc, agent=BOB,
+                  channel={"type": "note", "content": "restarting service"}),
+    ]
+    _pd_router(poll_mod, monkeypatch, team_entries=entries,
+               me={"id": "PUSER1", "name": "Me Myself", "email": "me@acme.com",
+                   "teams": [{"id": "PTEAM1"}]})
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert items[0]["message"] == \
+        "[mentioned you] note: Me Myself please look by Bob — Disk full"
+    assert items[1]["message"] == \
+        "[team incident] note: restarting service by Bob — Disk full"
+
+
+def test_pd_mentions_me_edge_cases(poll_mod):
+    assert poll_mod._pd_mentions_me({}, {"name": "Me"}) is False
+    assert poll_mod._pd_mentions_me({"summary": "ping me@acme.com"},
+                                    {"name": "", "email": "ME@acme.com"}) is True
+    assert poll_mod._pd_mentions_me({"summary": "nothing"},
+                                    {"name": "Me", "email": ""}) is False
+
+
+def test_pagerduty_priority_change_uses_summary(poll_mod, monkeypatch,
+                                                sample_cfg):
+    inc = _pd_incident(iid="PT1", num=9)
+    entries = [
+        _pd_entry("E1", "priority_change_log_entry", inc, agent=BOB,
+                  summary="Changed the priority to P1"),
+        _pd_entry("E2", "snooze_log_entry", inc, agent=BOB),  # no summary
+        _pd_entry("E3", "exhaust_escalation_path_log_entry", inc),
+        _pd_entry("E4", "unacknowledge_log_entry", inc),
+    ]
+    _pd_router(poll_mod, monkeypatch, team_entries=entries)
+    msgs = [it["message"] for it in
+            _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))]
+    assert msgs == [
+        "[team incident] Changed the priority to P1 by Bob — Disk full",
+        "[team incident] snoozed by Bob — Disk full",
+        "[team incident] escalation exhausted — nobody acknowledged — Disk full",
+        "[team incident] unacknowledged (ack timed out) — Disk full",
+    ]
+
+
+def test_pagerduty_notify_team_incidents_off_keeps_only_mine(poll_mod, monkeypatch,
+                                                             sample_cfg):
+    sample_cfg["pagerduty"]["notify_team_incidents"] = False
+    mine = _pd_incident(iid="PM1", num=1)
+    team = _pd_incident(iid="PT1", num=2)
+    entries = [
+        _pd_entry("E1", "acknowledge_log_entry", team, agent=BOB),
+        _pd_entry("E2", "acknowledge_log_entry", mine, agent=BOB),
+        _pd_entry("E3", "escalate_log_entry", team, assignees=[ME]),
+    ]
+    _pd_router(poll_mod, monkeypatch, team_entries=entries, mine_active=[mine])
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert [it["fp"] for it in items] == ["pd:PM1:E2", "pd:PT1:E3"]
+    assert items[0]["message"].startswith("[your incident]")
+    assert items[1]["message"].startswith("[assigned to you]")
+
+
+def test_pagerduty_low_urgency_is_silent_and_tagged(poll_mod, monkeypatch,
+                                                    sample_cfg):
+    inc = _pd_incident(iid="PT1", num=10, urgency="low", service="")
+    _pd_router(poll_mod, monkeypatch,
+               team_entries=[_pd_entry("E1", "trigger_log_entry", inc)])
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert items[0]["subtitle"] == "#10 · triggered · low urgency"
+    assert items[0]["sound"] is False
+    sample_cfg["pagerduty"]["low_urgency_sound"] = True
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert items[0]["sound"] is True
+
+
+def test_pagerduty_fetches_timeline_for_my_non_team_incidents(poll_mod,
+                                                             monkeypatch,
+                                                             sample_cfg):
+    other = _pd_incident(iid="PX1", num=11, teams=("PTEAM9",), title="Other")
+    on_team = _pd_incident(iid="PM1", num=12)
+    calls = _pd_router(poll_mod, monkeypatch, mine_active=[other, on_team],
+                       per_incident={"PX1": [
+                           _pd_entry("E1", "acknowledge_log_entry",
+                                     {"id": "PX1", "type": "incident_reference"},
+                                     agent=BOB)]})
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    # Only the incident outside my teams needs its own timeline request...
+    timeline_calls = [p for p, _ in calls if p.startswith("/incidents/")]
+    assert timeline_calls == ["/incidents/PX1/log_entries"]
+    # ...and the entry is enriched with the full incident for the text.
+    assert items[0]["message"] == "[your incident] acknowledged by Bob — Other"
+    assert items[0]["subtitle"] == "#11 · triggered · prod-api"
+
+
+def test_pagerduty_caps_per_incident_timeline_requests(poll_mod, monkeypatch,
+                                                       sample_cfg):
+    mine = [_pd_incident(iid=f"PX{i}", num=i, teams=()) for i in range(15)]
+    calls = _pd_router(poll_mod, monkeypatch, mine_active=mine)
+    poll_mod.pagerduty_items(sample_cfg, 10)
+    timeline_calls = [p for p, _ in calls if p.startswith("/incidents/")]
+    assert len(timeline_calls) == poll_mod._PD_MAX_PER_INCIDENT_FETCH
+
+
+def test_pagerduty_recently_resolved_mine_included(poll_mod, monkeypatch,
+                                                   sample_cfg):
+    fresh = _pd_incident(iid="PR1", num=13, status="resolved", teams=(),
+                         resolved_at=_recent_iso(3))
+    stale = _pd_incident(iid="PR2", num=14, status="resolved", teams=(),
+                         resolved_at=_recent_iso(60 * 24))
+    calls = _pd_router(poll_mod, monkeypatch, mine_resolved=[fresh, stale],
+                       per_incident={"PR1": [_pd_entry("E1", "resolve_log_entry",
+                                                       {"id": "PR1"}, agent=BOB)]})
+    status = {}
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10, status))
+    assert [it["fp"] for it in items] == ["pd:PR1:E1"]
+    assert items[0]["message"] == "[your incident] resolved by Bob — Disk full"
+    # Resolved incidents are not "active" for the menu.
+    assert status["active_incidents"] == []
+    resolved_call = next(params for p, params in calls if p == "/incidents"
+                         and _has(params, "statuses[]", "resolved"))
+    assert _has(resolved_call, "sort_by", "resolved_at:desc")
+
+
+def test_pd_my_incidents_without_user_id(poll_mod):
+    assert poll_mod._pd_my_incidents("tok", "", None) == []
+
+
+def test_pagerduty_dedupes_entries_across_teams(poll_mod, monkeypatch, sample_cfg):
+    sample_cfg["pagerduty"]["team_ids"] = ["PTEAM1", "PTEAM2"]
+    inc = _pd_incident(iid="PT1", num=15)
+    e = _pd_entry("E1", "trigger_log_entry", inc)
+    _pd_router(poll_mod, monkeypatch, team_entries=[e, dict(e)])
+    items = _incident_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert len(items) == 1
+
+
+def test_pagerduty_status_lists_active_incidents(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    mine = [_pd_incident(iid="PM1", num=1, status="triggered"),
+            _pd_incident(iid="PM2", num=2, status="acknowledged", urgency="low",
+                         title="Slow")]
+    _pd_router(poll_mod, monkeypatch, mine_active=mine)
+    status = {}
+    poll_mod.pagerduty_items(sample_cfg, 10, status)
+    assert status["active_incidents"] == [
+        {"number": 1, "status": "triggered", "urgency": "high",
+         "title": "Disk full", "url": "https://acme.pagerduty.com/incidents/PINC1"},
+        {"number": 2, "status": "acknowledged", "urgency": "low",
+         "title": "Slow", "url": "https://acme.pagerduty.com/incidents/PINC1"},
+    ]
+    assert status["on_call"] is False
+
+
+def test_pagerduty_only_teams_when_no_user_id(poll_mod, monkeypatch):
+    cfg = {"pagerduty": {"enabled": True, "api_token": "tok",
+                         "user_id": "", "team_ids": ["PTEAM1"]}}
+    inc = _pd_incident(iid="PT1", num=9)
+    calls = _pd_router(poll_mod, monkeypatch,
+                       team_entries=[_pd_entry("E1", "trigger_log_entry", inc)],
+                       me={"id": "", "teams": []})
+    items = poll_mod.pagerduty_items(cfg, 10)
+    # No user id -> no assigned-incident or on-call queries; team events only.
+    assert not any(p in ("/incidents", "/oncalls") for p, _ in calls)
+    assert len(items) == 1
+    assert items[0]["message"].startswith("[team incident]")
+
+
+# -- on-call shifts ---------------------------------------------------------
+
+def _oncall(start, end, sched_id="PSCHED1", name="Primary", policy="Backend"):
+    return {
+        "schedule": {"id": sched_id, "summary": name,
+                     "html_url": f"https://acme.pagerduty.com/schedules/{sched_id}"},
+        "escalation_policy": {"id": "PPOL1", "summary": policy},
+        "start": start.isoformat() if start else None,
+        "end": end.isoformat() if end else None,
+    }
+
+
+def _oncall_items(items):
+    return [it for it in items if it["message"].startswith("[on-call]")]
+
+
+def test_pagerduty_oncall_shift_started(poll_mod, monkeypatch, sample_cfg):
+    now = datetime.now(timezone.utc)
+    oc = _oncall(now - timedelta(minutes=2), now + timedelta(hours=8))
+    calls = _pd_router(poll_mod, monkeypatch, oncalls=[oc])
+    status = {}
+    items = _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10, status))
+    assert len(items) == 1
+    assert items[0]["fp"] == f"pd-oncall:PSCHED1:{oc['start']}:start"
+    assert items[0]["subtitle"] == "On-call · Primary"
+    assert items[0]["message"].startswith("[on-call] Your on-call shift started (")
+    assert items[0]["url"] == "https://acme.pagerduty.com/schedules/PSCHED1"
+    assert items[0]["sound"] is True
+    assert status["on_call"] is True
+    assert status["schedule"] == "Primary"
+    assert poll_mod._parse_dt(status["until"]) == poll_mod._parse_dt(oc["end"])
+    path, params = next(c for c in calls if c[0] == "/oncalls")
+    assert _has(params, "user_ids[]", "PUSER1")
+
+
+def test_pagerduty_oncall_upcoming_reminder(poll_mod, monkeypatch, sample_cfg):
+    now = datetime.now(timezone.utc)
+    # Starts in 58 min -> the 60-min reminder fell due 2 min ago (in window).
+    oc = _oncall(now + timedelta(minutes=58), now + timedelta(hours=9))
+    _pd_router(poll_mod, monkeypatch, oncalls=[oc])
+    status = {}
+    items = _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10, status))
+    assert len(items) == 1
+    assert items[0]["fp"] == f"pd-oncall:PSCHED1:{oc['start']}:before:60"
+    assert items[0]["message"].startswith("[on-call] You go on-call in 1h (")
+    assert status["on_call"] is False
+    assert status["next_schedule"] == "Primary"
+    assert poll_mod._parse_dt(status["next_start"]) == poll_mod._parse_dt(oc["start"])
+
+
+def test_pagerduty_oncall_reminder_not_due(poll_mod, monkeypatch, sample_cfg):
+    now = datetime.now(timezone.utc)
+    # Starts in 3 days: neither the 1-day nor the 1-hour reminder is due.
+    oc = _oncall(now + timedelta(days=3), now + timedelta(days=3, hours=8))
+    _pd_router(poll_mod, monkeypatch, oncalls=[oc])
+    assert _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10)) == []
+
+
+def test_pagerduty_oncall_day_reminder(poll_mod, monkeypatch, sample_cfg):
+    sample_cfg["pagerduty"]["oncall_remind_before_minutes"] = [1440, "60", 0, "x"]
+    now = datetime.now(timezone.utc)
+    oc = _oncall(now + timedelta(minutes=1440 - 3), now + timedelta(days=2))
+    _pd_router(poll_mod, monkeypatch, oncalls=[oc])
+    items = _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10))
+    assert len(items) == 1
+    assert "You go on-call in 1 day (" in items[0]["message"]
+
+
+def test_pagerduty_oncall_shift_ended(poll_mod, monkeypatch, sample_cfg):
+    now = datetime.now(timezone.utc)
+    oc = _oncall(now - timedelta(hours=8), now - timedelta(minutes=3))
+    _pd_router(poll_mod, monkeypatch, oncalls=[oc])
+    status = {}
+    items = _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10, status))
+    assert len(items) == 1
+    assert items[0]["fp"].endswith(":end")
+    assert "Your on-call shift ended (" in items[0]["message"]
+    assert items[0]["sound"] is False
+    assert status["on_call"] is False and status["next_start"] is None
+
+
+def test_pagerduty_oncall_permanent_level_counts_as_on_call(poll_mod, monkeypatch,
+                                                            sample_cfg):
+    oc = {"schedule": None, "escalation_policy": {"id": "PPOL1", "summary": "Ops"},
+          "start": None, "end": None}
+    _pd_router(poll_mod, monkeypatch, oncalls=[oc])
+    status = {}
+    items = _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10, status))
+    assert items == []  # no shift boundaries to remind about
+    assert status["on_call"] is True and status["until"] is None
+    assert status["schedule"] == "Ops"
+
+
+def test_pagerduty_oncall_dedupes_same_shift_and_picks_latest_end(poll_mod,
+                                                                  monkeypatch,
+                                                                  sample_cfg):
+    now = datetime.now(timezone.utc)
+    a = _oncall(now - timedelta(hours=1), now + timedelta(hours=1))
+    b = _oncall(now - timedelta(hours=1), now + timedelta(hours=1), policy="Other")
+    c = _oncall(now - timedelta(hours=2), now + timedelta(hours=5),
+                sched_id="PSCHED2", name="Secondary")
+    _pd_router(poll_mod, monkeypatch, oncalls=[a, b, c])
+    status = {}
+    items = _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10, status))
+    assert items == []  # shifts started before the window
+    assert status["schedule"] == "Secondary"  # the one ending last wins
+
+
+def test_pagerduty_oncall_permanent_does_not_override_shift(poll_mod, monkeypatch,
+                                                            sample_cfg):
+    now = datetime.now(timezone.utc)
+    perm = {"schedule": None, "escalation_policy": {"id": "P", "summary": "Ops"},
+            "start": None, "end": None}
+    shift = _oncall(now - timedelta(hours=1), now + timedelta(hours=1))
+    _pd_router(poll_mod, monkeypatch, oncalls=[shift, perm])
+    status = {}
+    poll_mod.pagerduty_items(sample_cfg, 10, status)
+    assert status["schedule"] == "Primary" and status["until"] is not None
+    # Reverse order: the permanent entry is kept (a timed shift can't beat None).
+    _pd_router(poll_mod, monkeypatch, oncalls=[perm, shift])
+    status = {}
+    poll_mod.pagerduty_items(sample_cfg, 10, status)
+    assert status["schedule"] == "Ops" and status["until"] is None
+
+
+def test_pagerduty_oncall_disabled(poll_mod, monkeypatch, sample_cfg):
+    sample_cfg["pagerduty"]["oncall_reminders"] = False
+    now = datetime.now(timezone.utc)
+    calls = _pd_router(poll_mod, monkeypatch,
+                       oncalls=[_oncall(now - timedelta(minutes=1), now + timedelta(hours=1))])
+    status = {}
+    assert _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10, status)) == []
+    assert not any(p == "/oncalls" for p, _ in calls)
+    assert status["on_call"] is False
+
+
+def test_pagerduty_oncall_no_reminders_configured(poll_mod, monkeypatch, sample_cfg):
+    sample_cfg["pagerduty"]["oncall_remind_before_minutes"] = []
+    now = datetime.now(timezone.utc)
+    oc = _oncall(now + timedelta(minutes=30), now + timedelta(hours=9))
+    _pd_router(poll_mod, monkeypatch, oncalls=[oc])
+    assert _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10)) == []
+
+
+def test_pd_format_helpers(poll_mod):
+    assert poll_mod.pd_format_time(None) == ""
+    assert poll_mod.pd_format_time("garbage") == ""
+    assert poll_mod.pd_format_time("2026-07-01T12:00:00Z")  # some label
+    now = datetime.now(timezone.utc)
+    assert poll_mod.pd_format_time(now) == now.astimezone().strftime("%a %H:%M")
+    assert poll_mod._pd_fmt_minutes(1440) == "1 day"
+    assert poll_mod._pd_fmt_minutes(2880) == "2 days"
+    assert poll_mod._pd_fmt_minutes(120) == "2h"
+    assert poll_mod._pd_fmt_minutes(45) == "45 min"
+
+
+def test_collect_all_fills_extra_with_pagerduty_status(poll_mod, monkeypatch,
+                                                       sample_cfg):
+    monkeypatch.setattr(poll_mod, "jira_items", lambda cfg, w: [])
+    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: [])
+    monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
+    monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
+
+    def fake_pd(cfg, w, status=None):
+        status["on_call"] = True
+        return []
+
+    monkeypatch.setattr(poll_mod, "pagerduty_items", fake_pd)
+    extra = {}
+    poll_mod.collect_all(sample_cfg, extra=extra)
+    assert extra == {"pagerduty": {"on_call": True}}
 
 
 def test_default_log_prints(poll_mod, capsys):

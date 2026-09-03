@@ -58,7 +58,7 @@ relevant to the current user and shows native, clickable desktop notifications.
 | Path | Purpose |
 |------|---------|
 | `src/notifier_app.py` | Menu-bar app: timers, notifications, menu, threading |
-| `src/poll.py` | Fetch Jira/GitHub items (pure data gathering) |
+| `src/poll.py` | Fetch Jira/GitHub/PagerDuty items (pure data gathering) |
 | `src/deps.py` | Dependency checks + login-item (LaunchAgent) management |
 | `src/config.py` | Config file loading/defaults |
 | `src/updater.py` | Auto-update checks against GitHub Releases |
@@ -89,7 +89,7 @@ relevant to the current user and shows native, clickable desktop notifications.
 
 ## Threading rule (important, easy to get wrong)
 
-Network I/O (Jira/GitHub/`gh`) runs on background worker threads so the menu
+Network I/O (Jira/GitHub/PagerDuty/`gh`) runs on background worker threads so the menu
 bar never freezes. **AppKit/rumps UI updates must happen on the main thread.**
 Hand results back with `self._run_on_main(fn)`, which uses
 `PyObjCTools.AppHelper.callAfter`.

@@ -820,7 +820,7 @@ def test_poll_once_processes_new_items(sync_app, app_mod, monkeypatch):
     items = [{"fp": "jira:1", "title": "Jira", "subtitle": "ACME-1 · Open",
               "message": "updated", "url": "https://x"}]
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None, since_ts=None: [("jira", items)])
+                        lambda cfg, log=None, since_ts=None, extra=None: [("jira", items)])
     sync_app.state = {"seen": {}}
     sync_app._poll_once(manual=False)
     # The new item became a recent entry and was marked seen.
@@ -836,7 +836,7 @@ def test_poll_once_passes_last_poll_as_since(sync_app, app_mod, monkeypatch):
                         lambda cfg: _full_dep_status(True, []))
     captured = {}
 
-    def fake_collect(cfg, log=None, since_ts=None):
+    def fake_collect(cfg, log=None, since_ts=None, extra=None):
         captured["since_ts"] = since_ts
         return [("jira", [])]
 
@@ -854,7 +854,7 @@ def test_poll_once_skips_passing_ci(sync_app, app_mod, monkeypatch):
     items = [{"fp": "ci:1", "title": "GitHub CI", "subtitle": "s",
               "message": "m", "url": "u", "ci_only": True, "ci_rollup": "pass"}]
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None, since_ts=None: [("ci", items)])
+                        lambda cfg, log=None, since_ts=None, extra=None: [("ci", items)])
     sync_app.state = {"seen": {}}
     sync_app.recent = []
     sync_app._poll_once(manual=False)
@@ -868,7 +868,7 @@ def test_poll_once_collect_all_error(sync_app, app_mod, monkeypatch):
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
 
-    def boom(cfg, log=None, since_ts=None):
+    def boom(cfg, log=None, since_ts=None, extra=None):
         raise RuntimeError("collect failed")
 
     monkeypatch.setattr(app_mod.poll_mod, "collect_all", boom)
@@ -940,7 +940,7 @@ def test_poll_once_manual_no_new_items_notifies(sync_app, app_mod, monkeypatch):
                         lambda cfg: _full_dep_status(True, []))
     # Item already seen -> no new items -> manual run reports "all caught up".
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None, since_ts=None: [("jira", [
+                        lambda cfg, log=None, since_ts=None, extra=None: [("jira", [
                             {"fp": "seen:1", "title": "Jira", "subtitle": "s",
                              "message": "m", "url": "u"}])])
     sync_app.state = {"seen": {"seen:1": 111.0}}
@@ -1046,7 +1046,7 @@ def test_poll_once_manual_exits_checking_on_results(sync_app, app_mod, monkeypat
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None, since_ts=None: [("jira", [])])
+                        lambda cfg, log=None, since_ts=None, extra=None: [("jira", [])])
     exited = {"v": False}
     monkeypatch.setattr(sync_app, "_exit_checking",
                         lambda: exited.__setitem__("v", True))
@@ -1074,7 +1074,7 @@ def test_poll_once_manual_exits_checking_on_error(sync_app, app_mod, monkeypatch
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
 
-    def boom(cfg, log=None, since_ts=None):
+    def boom(cfg, log=None, since_ts=None, extra=None):
         raise RuntimeError("network down")
 
     monkeypatch.setattr(app_mod.poll_mod, "collect_all", boom)
@@ -1095,7 +1095,7 @@ def test_poll_once_nonmanual_does_not_exit_checking(sync_app, app_mod, monkeypat
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
                         lambda cfg: _full_dep_status(True, []))
     monkeypatch.setattr(app_mod.poll_mod, "collect_all",
-                        lambda cfg, log=None, since_ts=None: [("jira", [])])
+                        lambda cfg, log=None, since_ts=None, extra=None: [("jira", [])])
     exited = {"v": False}
     monkeypatch.setattr(sync_app, "_exit_checking",
                         lambda: exited.__setitem__("v", True))
@@ -1112,3 +1112,158 @@ def test_build_menu_shows_checking_item_when_busy(app, app_mod):
     assert first.title == "Checking…"
     # The busy hint is non-interactive.
     assert first.callback is None
+
+
+# ---------------------------------------------------------------------------
+# PagerDuty: silent notifications, on-call/incident submenu, status plumbing
+# ---------------------------------------------------------------------------
+
+def _pd_children(item):
+    return [getattr(c, "title", "") for c in item.children]
+
+
+def test_notify_honours_item_sound_flag(app):
+    app._notify({"title": "PagerDuty", "subtitle": "s", "message": "m",
+                 "url": "u", "sound": False})
+    assert app.backend.notifications[-1]["sound"] is False
+    app._notify({"title": "PagerDuty", "subtitle": "s", "message": "m", "url": "u"})
+    assert app.backend.notifications[-1]["sound"] is True  # default
+
+
+def test_pagerduty_menuitem_hidden_when_disabled(app):
+    app.cfg["pagerduty"] = {"enabled": False}
+    assert app._pagerduty_menuitem() is None
+    app._build_menu()
+    assert not any(getattr(i, "title", "").startswith("PagerDuty")
+                   for i in app.menu)
+
+
+def test_pagerduty_menuitem_placeholder_before_first_poll(app):
+    app.cfg["pagerduty"] = {"enabled": True}
+    app.pd_status = {}
+    app._build_menu()
+    item = next(i for i in app.menu if getattr(i, "title", "") == "PagerDuty")
+    assert _pd_children(item) == ["Waiting for first check…"]
+
+
+def test_pagerduty_menuitem_on_call_with_incidents(app, app_mod):
+    app.cfg["pagerduty"] = {"enabled": True}
+    app.pd_status = {
+        "on_call": True, "until": "2026-07-02T18:00:00+00:00",
+        "schedule": "Primary", "next_start": None, "next_schedule": "",
+        "active_incidents": [
+            {"number": 1, "status": "triggered", "urgency": "high",
+             "title": "Disk full", "url": "https://pd/1"},
+            {"number": 2, "status": "acknowledged", "urgency": "low",
+             "title": "Slow", "url": "https://pd/2"},
+        ],
+    }
+    item = app._pagerduty_menuitem()
+    assert item.title == "PagerDuty: on-call · 2 open"
+    titles = _pd_children(item)
+    until = app_mod.poll_mod.pd_format_time("2026-07-02T18:00:00+00:00")
+    assert titles[0] == f"On-call now until {until} (Primary)"
+    assert "Open incidents assigned to you: 2" in titles
+    assert "#1 triggered ⚡ — Disk full" in titles
+    assert "#2 acknowledged — Slow" in titles
+    # Clicking an incident opens it.
+    inc_item = next(c for c in item.children
+                    if getattr(c, "title", "").startswith("#1 "))
+    inc_item.callback(inc_item)
+    assert app.backend.opened_urls[-1] == "https://pd/1"
+    # Status submenu also flags the on-call state.
+    app.dep_status = {"pending": False, "jira_ok": False,
+                      "jira": {"enabled": False}, "github_ok": False,
+                      "pagerduty_ok": True}
+    status_titles = _pd_children(app._status_menuitem())
+    assert "PagerDuty: ✓ Ready · on-call" in status_titles
+
+
+def test_pagerduty_menuitem_not_on_call_with_next(app, app_mod):
+    app.cfg["pagerduty"] = {"enabled": True}
+    app.pd_status = {"on_call": False, "until": None, "schedule": "",
+                     "next_start": "2026-07-03T09:00:00+00:00",
+                     "next_schedule": "Primary", "active_incidents": []}
+    item = app._pagerduty_menuitem()
+    assert item.title == "PagerDuty: not on-call"
+    titles = _pd_children(item)
+    nxt = app_mod.poll_mod.pd_format_time("2026-07-03T09:00:00+00:00")
+    assert titles[0] == f"Not on-call · next: {nxt} (Primary)"
+    assert "No open incidents assigned to you" in titles
+
+
+def test_pagerduty_menuitem_minimal_fields(app):
+    # Permanent on-call (no end) and no schedule name / no next shift.
+    app.cfg["pagerduty"] = {"enabled": True}
+    app.pd_status = {"on_call": True, "until": None, "schedule": "",
+                     "next_start": None, "active_incidents": []}
+    assert _pd_children(app._pagerduty_menuitem())[0] == "On-call now"
+    app.pd_status = {"on_call": False, "next_start": None}
+    assert _pd_children(app._pagerduty_menuitem())[0] == "Not on-call"
+
+
+def test_pagerduty_menuitem_caps_listed_incidents(app):
+    app.cfg["pagerduty"] = {"enabled": True}
+    app.pd_status = {"on_call": False, "active_incidents": [
+        {"number": i, "status": "triggered", "urgency": "high",
+         "title": f"inc {i}", "url": f"https://pd/{i}"} for i in range(12)]}
+    item = app._pagerduty_menuitem()
+    listed = [t for t in _pd_children(item) if t.startswith("#")]
+    assert len(listed) == app.PD_MENU_INCIDENTS
+    assert item.title == "PagerDuty: not on-call · 12 open"
+
+
+def test_open_pd_incident_without_url_is_noop(app):
+    class Sender:
+        url = ""
+
+    app._open_pd_incident(Sender())
+    assert app.backend.opened_urls == []
+
+
+def test_poll_once_stores_pagerduty_status(sync_app, app_mod, monkeypatch):
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+
+    def fake_collect(cfg, log=None, since_ts=None, extra=None):
+        extra["pagerduty"] = {"on_call": True, "active_incidents": []}
+        return [("pagerduty", [])]
+
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all", fake_collect)
+    sync_app.state = {"seen": {}}
+    sync_app._poll_once(manual=False)
+    assert sync_app.pd_status == {"on_call": True, "active_incidents": []}
+
+
+def test_recheck_deps_all_good_lists_ready_sources(sync_app, app_mod, monkeypatch):
+    sync_app.backend.notifications.clear()
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: {"problems": [], "ok": True, "pending": False,
+                                     "jira_ok": True, "jira": {"enabled": True},
+                                     "github_ok": False, "pagerduty_ok": True})
+    sync_app._recheck_deps(None)
+    assert sync_app.backend.notifications[-1]["message"] == \
+        "Jira / PagerDuty ready."
+
+
+def test_recheck_deps_all_good_fallback_message(sync_app, app_mod, monkeypatch):
+    sync_app.backend.notifications.clear()
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: {"problems": [], "ok": True, "pending": False,
+                                     "jira_ok": False, "jira": {"enabled": False},
+                                     "github_ok": False})
+    sync_app._recheck_deps(None)
+    assert sync_app.backend.notifications[-1]["message"] == "All sources ready."
+
+
+def test_setup_messages_mention_pagerduty(sync_app, app_mod, monkeypatch):
+    sync_app.backend.notifications.clear()
+    sync_app.dep_status = {"ok": False, "problems": []}
+    sync_app._warn_if_unmet()
+    assert "Jira/GitHub/PagerDuty" in sync_app.backend.notifications[-1]["message"]
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(False, []))
+    sync_app._poll_once(manual=False)
+    assert "Jira/GitHub/PagerDuty" in sync_app.backend.notifications[-1]["message"]
