@@ -787,7 +787,10 @@ class NotifierApp:
                     fp = it["fp"]
                     if fp in seen:
                         continue
-                    if it.get("ci_only") and it.get("ci_rollup") == "pass":
+                    # ``quiet`` items (and passing CI) are remembered so they
+                    # never notify later, but are not surfaced now.
+                    if it.get("quiet") or (
+                            it.get("ci_only") and it.get("ci_rollup") == "pass"):
                         seen[fp] = time.time()
                         continue
                     url = it.get("url", "")

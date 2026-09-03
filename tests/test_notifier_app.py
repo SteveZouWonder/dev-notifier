@@ -863,6 +863,30 @@ def test_poll_once_skips_passing_ci(sync_app, app_mod, monkeypatch):
     assert "ci:1" in sync_app.state["seen"]
 
 
+def test_poll_once_quiet_items_marked_seen_without_notifying(
+        sync_app, app_mod, monkeypatch):
+    sync_app.backend.notifications.clear()
+    monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
+    monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",
+                        lambda cfg: _full_dep_status(True, []))
+    items = [
+        {"fp": "ci:pending", "title": "GitHub CI", "subtitle": "s",
+         "message": "pending", "url": "u", "ci_only": True,
+         "ci_rollup": "pending", "quiet": True},
+        {"fp": "ci:fail", "title": "GitHub CI", "subtitle": "s",
+         "message": "fail", "url": "u", "ci_only": True, "ci_rollup": "fail"},
+    ]
+    monkeypatch.setattr(app_mod.poll_mod, "collect_all",
+                        lambda cfg, log=None, since_ts=None, extra=None: [("ci", items)])
+    sync_app.state = {"seen": {}}
+    sync_app.recent = []
+    sync_app._poll_once(manual=False)
+    # Both remembered; only the loud one notified / listed under Recent.
+    assert set(sync_app.state["seen"]) == {"ci:pending", "ci:fail"}
+    assert [r["label"] for r in sync_app.recent] == ["s — fail"]
+    assert [n["message"] for n in sync_app.backend.notifications] == ["fail"]
+
+
 def test_poll_once_collect_all_error(sync_app, app_mod, monkeypatch):
     monkeypatch.setattr(app_mod.cfg_mod, "ensure_config", lambda: sync_app.cfg)
     monkeypatch.setattr(app_mod.deps_mod, "check_dependencies",

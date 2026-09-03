@@ -245,7 +245,10 @@ behaviour:
 | `jira.event_mode` | `true` | One notification per change/comment vs. per issue |
 | `jira.event_fields` | `["status","assignee"]` | Which Jira field changes notify you |
 | `github.login` | `""` | Leave blank to auto‑detect via `gh api user` |
-| `jira.suppress_self` / `github.suppress_self` / `pagerduty.suppress_self` | `true` | Hide things you did yourself (your own comments, acks, resolves…) |
+| `jira.suppress_self` / `github.suppress_self` / `pagerduty.suppress_self` | `true` | Hide things you did yourself (your own comments, acks, resolves, pushes to your own PR, GitHub Actions runs you triggered…) |
+| `jira.suppress_automation` | `true` | Hide changes made by apps/automation rules (e.g. "Automation for Jira" moving a ticket after you opened a PR) — unless they assign the issue to you |
+| `github.ci_notify` | `["fail"]` | Which CI roll‑up states on your own open PRs pop up a notification (`fail`, `pending`, `pass`); the others are remembered silently. `[]` turns CI notifications off |
+| `github.emails` | `[]` | Extra git author emails that count as *you* when GitHub cannot link a commit to your account (e.g. a mistyped `git config user.email`). Your profile's public email is picked up automatically |
 | `pagerduty.user_id` / `team_ids` | auto | Leave blank to auto‑detect |
 | `pagerduty.notify_team_incidents` | `true` | Also notify about your teams' incidents, not just ones assigned to you |
 | `pagerduty.low_urgency_sound` | `false` | Play a sound for low‑urgency incidents too (they're silent by default) |
@@ -273,12 +276,15 @@ comments, so the meaning of each field is in the table above.)
     "api_token": "",
     "event_mode": true,
     "event_fields": ["status", "assignee"],
-    "suppress_self": true
+    "suppress_self": true,
+    "suppress_automation": true
   },
   "github": {
     "enabled": true,
     "login": "",
-    "suppress_self": true
+    "suppress_self": true,
+    "ci_notify": ["fail"],
+    "emails": []
   },
   "pagerduty": {
     "enabled": false,
