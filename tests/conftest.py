@@ -22,8 +22,18 @@ def temp_home(tmp_path, monkeypatch):
     Modules that compute paths at import time (config, deps, updater) resolve
     ``Path.home()`` in module globals, so we patch and reload them to pick up
     the temp home.
+
+    ``paths.config_dir()`` does not use the home dir everywhere: Windows reads
+    ``%APPDATA%`` / ``%LOCALAPPDATA%`` and Linux honours ``$XDG_*``. Point
+    those at the temp dir too, otherwise tests on the Windows CI runner write
+    to (and leak state between tests via) the runner's real AppData.
     """
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / ".cache"))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     yield tmp_path
 

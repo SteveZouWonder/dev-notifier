@@ -831,7 +831,8 @@ def _ci_rollup_for_pr(pr: dict):
     # concrete run (e.g. .../actions/runs/<id>/job/<id>), so hashing the links
     # distinguishes runs while staying stable across polls of the same run.
     links = sorted(str(c.get("link") or "") for c in checks if c.get("link"))
-    run_id = hashlib.sha1("\n".join(links).encode()).hexdigest()[:10] if links else ""
+    run_id = (hashlib.sha256("\n".join(links).encode()).hexdigest()[:10]
+              if links else "")
     fp = f"gh-ci:{repo}#{num}:{rollup}" + (f":{run_id}" if run_id else "")
     return {
         "fp": fp,
