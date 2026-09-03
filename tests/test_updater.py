@@ -21,16 +21,18 @@ def updater_mod(temp_home):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("raw,expected", [
-    ("1.2.3", (1, 2, 3)),
-    ("v1.2.3", (1, 2, 3)),
-    ("V10.0.1", (10, 0, 1)),
-    ("1.4.0-beta.1", (1, 4, 0)),  # suffix ignored
+    ("1.2.3", (1, 2, 3, 1, "")),
+    ("v1.2.3", (1, 2, 3, 1, "")),
+    ("V10.0.1", (10, 0, 1, 1, "")),
+    ("1.4.0-beta.1", (1, 4, 0, 0, "beta.1")),  # pre-release ranks below final
+    ("2.0.0-beta", (2, 0, 0, 0, "beta")),
+    ("2.0.0.rc1", (2, 0, 0, 0, "rc1")),
 ])
 def test_parse_version_valid(updater_mod, raw, expected):
     assert updater_mod.parse_version(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["", "abc", "1.2", "vX.Y.Z"])
+@pytest.mark.parametrize("raw", ["", "abc", "1.2", "vX.Y.Z", "1.2.3-", "1.2.3 x"])
 def test_parse_version_invalid(updater_mod, raw):
     assert updater_mod.parse_version(raw) is None
 
@@ -41,6 +43,13 @@ def test_parse_version_invalid(updater_mod, raw):
     ("1.2.9", "1.3.0", False),
     ("2.0.0", "1.9.9", True),
     ("bad", "1.0.0", False),
+    # Pre-release ordering: beta users are offered the final, final users are
+    # never offered the beta, and a beta is still newer than an older final.
+    ("2.0.0", "2.0.0-beta", True),
+    ("2.0.0-beta", "2.0.0", False),
+    ("2.0.0-beta", "1.5.8", True),
+    ("2.0.0-rc.1", "2.0.0-beta", True),
+    ("2.0.0-beta", "2.0.0-beta", False),
 ])
 def test_is_newer(updater_mod, latest, current, expected):
     assert updater_mod.is_newer(latest, current) is expected
