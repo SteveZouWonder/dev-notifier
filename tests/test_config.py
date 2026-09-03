@@ -53,6 +53,20 @@ def test_first_run_template_is_simple(config_mod, temp_home):
     assert config_mod.DEFAULT_CONFIG["poll"]["interval_seconds"] == 300
 
 
+def test_optional_sources_are_off_by_default(config_mod, temp_home):
+    # Only Jira is on out of the box; GitHub and PagerDuty must be opted into,
+    # both in the runtime defaults and in the first-run template.
+    cfg = config_mod.ensure_config()
+    on_disk = json.loads(config_mod.CONFIG_FILE.read_text(encoding="utf-8"))
+
+    for source in ("github", "pagerduty"):
+        assert config_mod.DEFAULT_CONFIG[source]["enabled"] is False
+        assert on_disk[source]["enabled"] is False
+        assert cfg[source]["enabled"] is False
+    assert config_mod.DEFAULT_CONFIG["jira"]["enabled"] is True
+    assert on_disk["jira"]["enabled"] is True
+
+
 def test_ensure_config_reads_existing(config_mod):
     config_mod.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     config_mod.CONFIG_FILE.write_text(

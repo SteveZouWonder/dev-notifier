@@ -103,9 +103,9 @@ usually only need three Jira values:
 - **Jira token:** create one at
   <https://id.atlassian.com/manage-profile/security/api-tokens>, then paste it
   into `api_token`.
-- **GitHub** *(on by default)*: no token needed — it uses the
-  [`gh` CLI](https://cli.github.com). Run `gh auth login` once, or set
-  `"enabled": false` under `github` to turn it off.
+- **GitHub** *(off by default)*: set `"enabled": true` under `github` to turn
+  it on. No token needed — it uses the [`gh` CLI](https://cli.github.com);
+  run `gh auth login` once.
 - **PagerDuty** *(off by default)*: set `"enabled": true` and paste a personal
   **User API token** into `api_token` — create it under your avatar →
   **My Profile → User Settings → API Access → Create API User Token**
