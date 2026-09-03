@@ -365,3 +365,83 @@ def test_app_launch_target_frozen_no_bundle(deps_mod, monkeypatch):
     monkeypatch.setattr(deps_mod.sys, "executable", exe, raising=False)
     target = deps_mod._app_launch_target()
     assert target == [exe]
+
+
+# ---------------------------------------------------------------------------
+# login item: blocked from a mounted DMG, and path self-heal
+# ---------------------------------------------------------------------------
+
+def test_login_item_blocked_when_running_from_dmg(deps_mod, monkeypatch):
+    monkeypatch.setattr(deps_mod, "_app_launch_target",
+                        lambda: ["/usr/bin/open",
+                                 "/Volumes/DevNotifier 1.5.8/DevNotifier.app"])
+    reason = deps_mod.login_item_blocked_reason()
+    assert reason and "disk image" in reason
+    # enable refuses (and writes nothing) while blocked.
+    monkeypatch.setattr(deps_mod, "_run", lambda *a, **k: None)
+    assert deps_mod.enable_login_item() is False
+    assert not deps_mod.LAUNCH_AGENT_PLIST.exists()
+
+
+def test_login_item_not_blocked_from_applications(deps_mod, monkeypatch):
+    monkeypatch.setattr(deps_mod, "_app_launch_target",
+                        lambda: ["/usr/bin/open", "/Applications/DevNotifier.app"])
+    assert deps_mod.login_item_blocked_reason() is None
+    monkeypatch.setattr(deps_mod, "_app_launch_target", lambda: [])
+    assert deps_mod.login_item_blocked_reason() is None
+
+
+def test_launch_agent_limited_to_gui_session(deps_mod, monkeypatch):
+    import plistlib
+    monkeypatch.setattr(deps_mod, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(deps_mod, "_app_launch_target", lambda: ["/usr/bin/true"])
+    deps_mod.enable_login_item()
+    with deps_mod.LAUNCH_AGENT_PLIST.open("rb") as f:
+        data = plistlib.load(f)
+    assert data["LimitLoadToSessionType"] == "Aqua"
+
+
+def test_repair_login_item_noop_when_not_enabled(deps_mod, monkeypatch):
+    monkeypatch.setattr(deps_mod, "_app_launch_target",
+                        lambda: ["/usr/bin/open", "/Applications/DevNotifier.app"])
+    assert deps_mod.repair_login_item() is False
+
+
+def test_repair_login_item_rewrites_stale_path(deps_mod, monkeypatch):
+    import plistlib
+    monkeypatch.setattr(deps_mod, "_run", lambda *a, **k: None)
+    # Enabled while the app lived in ~/Downloads ...
+    monkeypatch.setattr(deps_mod, "_app_launch_target",
+                        lambda: ["/usr/bin/open", "/Users/me/Downloads/DevNotifier.app"])
+    assert deps_mod.enable_login_item() is True
+    # ... then moved to /Applications: startup repair re-points the plist.
+    monkeypatch.setattr(deps_mod, "_app_launch_target",
+                        lambda: ["/usr/bin/open", "/Applications/DevNotifier.app"])
+    assert deps_mod.repair_login_item() is True
+    with deps_mod.LAUNCH_AGENT_PLIST.open("rb") as f:
+        data = plistlib.load(f)
+    assert data["ProgramArguments"] == ["/usr/bin/open", "/Applications/DevNotifier.app"]
+    # Already correct -> nothing to do.
+    assert deps_mod.repair_login_item() is False
+
+
+def test_repair_login_item_skipped_from_dmg(deps_mod, monkeypatch):
+    monkeypatch.setattr(deps_mod, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(deps_mod, "_app_launch_target",
+                        lambda: ["/usr/bin/open", "/Applications/DevNotifier.app"])
+    deps_mod.enable_login_item()
+    # Running from the DMG must never re-point the agent at /Volumes/...
+    monkeypatch.setattr(deps_mod, "_app_launch_target",
+                        lambda: ["/usr/bin/open", "/Volumes/DN/DevNotifier.app"])
+    assert deps_mod.repair_login_item() is False
+
+
+def test_repair_login_item_handles_unreadable_plist(deps_mod, monkeypatch):
+    import plistlib
+    deps_mod.LAUNCH_AGENTS_DIR.mkdir(parents=True, exist_ok=True)
+    deps_mod.LAUNCH_AGENT_PLIST.write_bytes(b"not a plist")
+    monkeypatch.setattr(deps_mod, "_app_launch_target",
+                        lambda: ["/usr/bin/open", "/Applications/DevNotifier.app"])
+    assert deps_mod.repair_login_item() is True
+    with deps_mod.LAUNCH_AGENT_PLIST.open("rb") as f:
+        assert plistlib.load(f)["ProgramArguments"][-1].endswith("DevNotifier.app")

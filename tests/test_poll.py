@@ -815,7 +815,7 @@ def test_gh_notifications_filters_irrelevant_reasons(poll_mod, monkeypatch, samp
                      "url": "https://api.github.com/repos/acme/app/pulls/7"},
          "repository": {"full_name": "acme/app"}, "updated_at": "t"},
     ]
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: notifs)
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: notifs)
 
     items = poll_mod.gh_notifications(sample_cfg)
     assert len(items) == 1
@@ -823,9 +823,11 @@ def test_gh_notifications_filters_irrelevant_reasons(poll_mod, monkeypatch, samp
     assert items[0]["url"] == "https://github.com/acme/app/pull/7"
 
 
-def test_gh_notifications_fp_ignores_updated_at(poll_mod, monkeypatch, sample_cfg):
-    """The fingerprint depends only on the thread id, not ``updated_at``, so a
-    thread whose activity bumps ``updated_at`` is not re-notified."""
+def test_gh_notifications_fp_includes_updated_at(poll_mod, monkeypatch, sample_cfg):
+    """New activity on a thread bumps ``updated_at`` and must produce a new
+    fingerprint: a second review on the same PR is news. (Keying on the id
+    alone meant a PR notified exactly once in its lifetime.) The same
+    ``updated_at`` seen across two polls yields the same fingerprint."""
     def _notif(updated):
         return [{
             "id": "42", "reason": "review_requested",
@@ -834,11 +836,32 @@ def test_gh_notifications_fp_ignores_updated_at(poll_mod, monkeypatch, sample_cf
             "repository": {"full_name": "acme/app"}, "updated_at": updated,
         }]
 
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: _notif("2026-01-01T00:00:00Z"))
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: _notif("2026-01-01T00:00:00Z"))
     fp_first = poll_mod.gh_notifications(sample_cfg)[0]["fp"]
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: _notif("2026-02-02T09:09:09Z"))
+    fp_again = poll_mod.gh_notifications(sample_cfg)[0]["fp"]
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: _notif("2026-02-02T09:09:09Z"))
     fp_second = poll_mod.gh_notifications(sample_cfg)[0]["fp"]
-    assert fp_first == fp_second == "gh-notif:42"
+    assert fp_first == fp_again == "gh-notif:42:2026-01-01T00:00:00Z"
+    assert fp_second == "gh-notif:42:2026-02-02T09:09:09Z"
+
+
+def test_gh_notifications_list_failure_records_error(poll_mod, monkeypatch,
+                                                     sample_cfg):
+    """A failing ``gh api notifications`` is a *source failure*, not "no
+    news": it is recorded so the app can show it and hold the poll cursor."""
+    poll_mod.reset_errors()
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: poll_mod._GH_FAIL)
+    assert poll_mod.gh_notifications(sample_cfg) == []
+    assert "github" in poll_mod.poll_errors()
+    assert "gh auth status" in poll_mod.poll_errors()["github"]
+
+
+def test_gh_notifications_non_list_payload_is_empty(poll_mod, monkeypatch,
+                                                    sample_cfg):
+    poll_mod.reset_errors()
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: {"message": "weird"})
+    assert poll_mod.gh_notifications(sample_cfg) == []
+    assert poll_mod.poll_errors() == {}
 
 
 def test_gh_json_parses_stdout(poll_mod, monkeypatch, fake_proc):
@@ -904,7 +927,7 @@ def test_gh_notifications_uses_repo_url_when_no_subject_url(poll_mod, monkeypatc
         "subject": {"title": "no url here"},  # no subject url
         "repository": {"full_name": "acme/app"}, "updated_at": "t",
     }]
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: notifs)
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: notifs)
     items = poll_mod.gh_notifications(sample_cfg)
     assert items[0]["url"] == "https://github.com/acme/app/pulls"
 
@@ -915,7 +938,7 @@ def test_gh_notifications_falls_back_to_notifications_url(poll_mod, monkeypatch,
         "subject": {"title": "orphan"},  # no url, no repo
         "repository": {}, "updated_at": "t",
     }]
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: notifs)
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: notifs)
     items = poll_mod.gh_notifications(sample_cfg)
     assert items[0]["url"] == "https://github.com/notifications"
 
@@ -1184,7 +1207,7 @@ def test_gh_notifications_no_login_skips_actor_lookup(poll_mod, monkeypatch,
         assert args[:2] == ["api", "notifications"], "no actor lookup expected"
         return notifs
 
-    monkeypatch.setattr(poll_mod, "_gh_json", fake_gh)
+    monkeypatch.setattr(poll_mod, "_gh_api", fake_gh)
     assert len(poll_mod.gh_notifications(sample_cfg, "")) == 1
 
 
@@ -1203,7 +1226,7 @@ def test_gh_notifications_suppress_self_disabled(poll_mod, monkeypatch,
         assert args[:2] == ["api", "notifications"], "no actor lookup expected"
         return notifs
 
-    monkeypatch.setattr(poll_mod, "_gh_json", fake_gh)
+    monkeypatch.setattr(poll_mod, "_gh_api", fake_gh)
     assert len(poll_mod.gh_notifications(sample_cfg, "octocat")) == 1
 
 
@@ -1388,6 +1411,49 @@ def test_ci_rollup_no_checks_returns_none(poll_mod, monkeypatch):
     pr = {"url": "https://github.com/acme/app/pull/5", "title": "My PR"}
     monkeypatch.setattr(poll_mod, "_gh_json", lambda args: [])
     assert poll_mod._ci_rollup_for_pr(pr) is None
+    # A non-list / malformed payload is treated like "no checks".
+    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: {"oops": 1})
+    assert poll_mod._ci_rollup_for_pr(pr) is None
+    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: ["not-a-dict"])
+    assert poll_mod._ci_rollup_for_pr(pr) is None
+
+
+def test_ci_rollup_fp_distinguishes_runs(poll_mod, monkeypatch):
+    """Two CI runs on the same PR with the same roll-up (fail, push, fail
+    again) must have different fingerprints — otherwise the second failure
+    never notifies. The run identity comes from the checks' ``link``s."""
+    pr = {"url": "https://github.com/acme/app/pull/5", "title": "My PR"}
+    run1 = [{"bucket": "fail",
+             "link": "https://github.com/acme/app/actions/runs/111/job/1"}]
+    run2 = [{"bucket": "fail",
+             "link": "https://github.com/acme/app/actions/runs/222/job/1"}]
+    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: run1)
+    fp1 = poll_mod._ci_rollup_for_pr(pr)["fp"]
+    fp1_again = poll_mod._ci_rollup_for_pr(pr)["fp"]
+    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: run2)
+    fp2 = poll_mod._ci_rollup_for_pr(pr)["fp"]
+    assert fp1 == fp1_again
+    assert fp1 != fp2
+    assert fp1.startswith("gh-ci:acme/app#5:fail:")
+    # The requested fields include ``link`` so the run id is available.
+    seen_args = []
+    monkeypatch.setattr(poll_mod, "_gh_json",
+                        lambda args: seen_args.append(args) or run1)
+    poll_mod._ci_rollup_for_pr(pr)
+    assert "state,bucket,link" in seen_args[0]
+
+
+def test_gh_ci_fallback_search_failure_records_error(poll_mod, monkeypatch,
+                                                     sample_cfg):
+    poll_mod.reset_errors()
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: poll_mod._GH_FAIL)
+    assert poll_mod.gh_ci_fallback(sample_cfg, "octocat") == []
+    assert "github" in poll_mod.poll_errors()
+    # A non-list payload is treated as "no PRs".
+    poll_mod.reset_errors()
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: {"total_count": 0})
+    assert poll_mod.gh_ci_fallback(sample_cfg, "octocat") == []
+    assert poll_mod.poll_errors() == {}
 
 
 def test_ci_rollup_bad_url_returns_none(poll_mod):
@@ -1501,7 +1567,7 @@ def test_gh_ci_fallback_disabled_or_no_login(poll_mod):
 
 
 def test_gh_ci_fallback_no_prs(poll_mod, monkeypatch, sample_cfg):
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: [])
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: [])
     assert poll_mod.gh_ci_fallback(sample_cfg, "octocat") == []
 
 
@@ -1510,7 +1576,7 @@ def test_gh_ci_fallback_collects_rollups(poll_mod, monkeypatch, sample_cfg):
         {"url": "https://github.com/acme/app/pull/1", "title": "A"},
         {"url": "https://github.com/acme/app/pull/2", "title": "B"},
     ]
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: prs)
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: prs)
     # _ci_rollup_for_pr is called via a thread pool; return a rollup for #1
     # and None for #2 to exercise the filtering.
     def fake_rollup(pr):
@@ -1527,7 +1593,7 @@ def test_gh_ci_fallback_collects_rollups(poll_mod, monkeypatch, sample_cfg):
 def _ci_prs_and_rollups(poll_mod, monkeypatch):
     prs = [{"url": f"https://github.com/acme/app/pull/{i}", "title": r}
            for i, r in enumerate(("fail", "pending", "pass"), start=1)]
-    monkeypatch.setattr(poll_mod, "_gh_json", lambda args: prs)
+    monkeypatch.setattr(poll_mod, "_gh_api", lambda args: prs)
     monkeypatch.setattr(
         poll_mod, "_ci_rollup_for_pr",
         lambda pr: {"fp": f"gh-ci:{pr['title']}", "ci_only": True,
@@ -2287,7 +2353,180 @@ def test_collect_all_fills_extra_with_pagerduty_status(poll_mod, monkeypatch,
     monkeypatch.setattr(poll_mod, "pagerduty_items", fake_pd)
     extra = {}
     poll_mod.collect_all(sample_cfg, extra=extra)
-    assert extra == {"pagerduty": {"on_call": True}}
+    assert extra == {"pagerduty": {"on_call": True}, "errors": {}}
+
+
+# ---------------------------------------------------------------------------
+# Per-source error tracking (silent failures made visible)
+# ---------------------------------------------------------------------------
+
+def test_collect_all_reports_source_errors_in_extra(poll_mod, monkeypatch,
+                                                    sample_cfg):
+    """A source that recorded a fetch error shows up in ``extra["errors"]``
+    and the *other* sources' items are still returned."""
+    def bad_jira(cfg, w):
+        poll_mod._record_error("jira", "HTTP 401 unauthorized")
+        return []
+
+    monkeypatch.setattr(poll_mod, "jira_items", bad_jira)
+    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: ["g"])
+    monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
+    monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w, status=None: ["p"])
+    extra = {}
+    phases = poll_mod.collect_all(sample_cfg, extra=extra)
+    assert dict(phases)["github"] == ["g"]
+    assert dict(phases)["pagerduty"] == ["p"]
+    assert extra["errors"] == {"jira": "HTTP 401 unauthorized"}
+
+
+def test_collect_all_isolates_unexpected_exceptions(poll_mod, monkeypatch,
+                                                    sample_cfg):
+    """One source blowing up must not abort the poll: it becomes that
+    source's error and the rest is still delivered."""
+    def boom(cfg, w, status=None):
+        raise KeyError("bucket")
+
+    monkeypatch.setattr(poll_mod, "jira_items", lambda cfg, w: ["j"])
+    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: [])
+    monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
+    monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
+    monkeypatch.setattr(poll_mod, "pagerduty_items", boom)
+    extra = {}
+    phases = poll_mod.collect_all(sample_cfg, extra=extra)
+    assert dict(phases) == {"jira": ["j"], "github": [], "ci": [],
+                            "pagerduty": []}
+    assert "KeyError" in extra["errors"]["pagerduty"]
+
+
+def test_collect_all_skips_github_when_disabled(poll_mod, monkeypatch,
+                                                sample_cfg):
+    """No ``gh`` login lookup (and no WARN per poll) for non-GitHub users."""
+    sample_cfg["github"]["enabled"] = False
+
+    def no_login(cfg):
+        raise AssertionError("gh_login must not be called when GitHub is off")
+
+    monkeypatch.setattr(poll_mod, "jira_items", lambda cfg, w: [])
+    monkeypatch.setattr(poll_mod, "gh_login", no_login)
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w, status=None: [])
+    phases = poll_mod.collect_all(sample_cfg)
+    assert dict(phases)["github"] == [] and dict(phases)["ci"] == []
+
+
+def test_collect_all_resets_errors_between_polls(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    poll_mod._record_error("jira", "stale from last poll")
+    monkeypatch.setattr(poll_mod, "jira_items", lambda cfg, w: [])
+    monkeypatch.setattr(poll_mod, "gh_notifications", lambda cfg, login=None: [])
+    monkeypatch.setattr(poll_mod, "gh_ci_fallback", lambda cfg, login: [])
+    monkeypatch.setattr(poll_mod, "gh_login", lambda cfg: "octocat")
+    monkeypatch.setattr(poll_mod, "pagerduty_items", lambda cfg, w, status=None: [])
+    extra = {}
+    poll_mod.collect_all(sample_cfg, extra=extra)
+    assert extra["errors"] == {}
+
+
+def test_record_error_keeps_first_per_source(poll_mod):
+    poll_mod.reset_errors()
+    poll_mod._record_error("jira", "first")
+    poll_mod._record_error("jira", "second")
+    assert poll_mod.poll_errors() == {"jira": "first"}
+
+
+def _http_error(code, reason):
+    import urllib.error
+    return lambda: urllib.error.HTTPError("u", code, reason, {}, None)
+
+
+def _url_error(reason):
+    import urllib.error
+    return lambda: urllib.error.URLError(reason)
+
+
+@pytest.mark.parametrize("make,expected", [
+    (_http_error(401, "Unauthorized"),
+     "HTTP 401 unauthorized — check the API token / username"),
+    (_http_error(429, "Too Many"), "HTTP 429 rate limited — will retry next poll"),
+    (_http_error(500, "Server Error"), "HTTP 500 Server Error"),
+    (lambda: __import__("socket").timeout("t"), "timed out"),
+    (_url_error("timed out"), "timed out"),
+    (lambda: __import__("urllib.error").error.URLError(__import__("socket").timeout()),
+     "timed out"),
+    (_url_error("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+     "TLS certificate verification failed (corporate proxy?)"),
+    (_url_error("Name or service not known"),
+     "network error: Name or service not known"),
+    (lambda: __import__("subprocess").TimeoutExpired("gh", 45), "gh timed out"),
+    (lambda: ValueError("bad json"), "ValueError: bad json"),
+], ids=["401", "429", "500", "socket-timeout", "url-timeout-str",
+        "url-timeout-exc", "tls", "dns", "gh-timeout", "other"])
+def test_describe_error(poll_mod, make, expected):
+    assert poll_mod.describe_error(make()) == expected
+
+
+def test_jira_search_failure_is_recorded(poll_mod, monkeypatch, sample_cfg):
+    import urllib.error
+
+    def boom(*a, **k):
+        raise urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+
+    poll_mod.reset_errors()
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
+    assert poll_mod._jira_search(sample_cfg, 10) == []
+    assert poll_mod.poll_errors()["jira"].startswith("HTTP 401")
+
+
+def test_jira_changelog_failure_is_recorded(poll_mod, monkeypatch, sample_cfg):
+    def boom(*a, **k):
+        raise OSError("net down")
+
+    poll_mod.reset_errors()
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
+    assert poll_mod._jira_changelog(sample_cfg, "ACME-1") == []
+    assert "jira" in poll_mod.poll_errors()
+
+
+@pytest.mark.real_myself
+def test_jira_myself_failure_without_cache_is_recorded(poll_mod, monkeypatch,
+                                                       sample_cfg):
+    def boom(*a, **k):
+        raise OSError("net down")
+
+    poll_mod.reset_errors()
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
+    assert poll_mod._jira_myself(sample_cfg) == ""
+    assert "jira" in poll_mod.poll_errors()
+
+
+def test_pd_get_failure_is_recorded(poll_mod, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("net down")
+
+    poll_mod.reset_errors()
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
+    monkeypatch.setattr(poll_mod.urllib.request, "urlopen", boom)
+    assert poll_mod._pd_get("tok", "/users/me") == {}
+    assert "pagerduty" in poll_mod.poll_errors()
+
+
+def test_gh_login_failure_recorded_only_when_enabled(poll_mod, monkeypatch):
+    def boom(*a, **k):
+        raise OSError("gh missing")
+
+    monkeypatch.setattr(poll_mod, "_log", lambda m: None)
+    monkeypatch.setattr(poll_mod.subprocess, "run", boom)
+    monkeypatch.setattr(poll_mod._deps, "gh_path", lambda: "gh")
+    monkeypatch.setattr(poll_mod._deps, "augmented_env", lambda: {})
+    poll_mod.reset_errors()
+    assert poll_mod.gh_login({"github": {"login": "", "enabled": True}}) == ""
+    assert "github" in poll_mod.poll_errors()
+    poll_mod.reset_errors()
+    assert poll_mod.gh_login({"github": {"login": "", "enabled": False}}) == ""
+    assert poll_mod.poll_errors() == {}
 
 
 def test_default_log_prints(poll_mod, capsys):

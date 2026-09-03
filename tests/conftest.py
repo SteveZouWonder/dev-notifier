@@ -216,6 +216,10 @@ class FakeBackend:
         self.ran = False
         self.quit_called = False
         self._login_enabled = False
+        self.login_blocked = None   # reason string to simulate "can't enable"
+        self.repaired = False       # repair_login_item() return value
+        self.enable_ok = True       # enable_login_item() success flag
+        self.disable_ok = True      # disable_login_item() success flag
 
     # lifecycle
     def setup(self, name, icon):
@@ -263,12 +267,22 @@ class FakeBackend:
         return self._login_enabled
 
     def enable_login_item(self):
+        if not self.enable_ok:
+            return False
         self._login_enabled = True
         return True
 
     def disable_login_item(self):
+        if not self.disable_ok:
+            return False
         self._login_enabled = False
         return True
+
+    def login_item_blocked_reason(self):
+        return self.login_blocked
+
+    def repair_login_item(self):
+        return self.repaired
 
 
 @pytest.fixture

@@ -135,6 +135,22 @@ class TrayBackend(ABC):
     def disable_login_item(self) -> bool:
         """Unregister the app from starting at login. Returns success."""
 
+    def login_item_blocked_reason(self):
+        """Why start-at-login cannot be enabled right now, or ``None``.
+
+        Optional; the default says it is never blocked.
+        """
+        return None
+
+    def repair_login_item(self) -> bool:
+        """Re-point a stale start-at-login registration at the running app.
+
+        Optional; returns True when something was repaired. The default is a
+        no-op for platforms whose registration does not embed a path that can
+        go stale.
+        """
+        return False
+
 
 class Timer:
     """Minimal repeating-timer handle returned by :meth:`TrayBackend.add_timer`.

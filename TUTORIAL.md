@@ -23,14 +23,27 @@ command line needed.
 
 ### Step 1 — Install the app
 
-**macOS**
+**macOS** *(Apple Silicon)*
 1. Download the latest **`DevNotifier‑<version>.dmg`** from
    [Releases](../../releases).
-2. Open it and drag **DevNotifier** into your **Applications** folder.
-3. The first time, **right‑click** DevNotifier → **Open** → **Open**.
-   *(This build is free and open‑source, so it isn't signed with a paid Apple
-   certificate — that's why macOS asks. It's safe.)*
-4. If it asks to send notifications, click **Allow**.
+2. Open it and drag **DevNotifier** into your **Applications** folder. (Don't
+   just double‑click it inside the DMG window — run the copy in Applications.)
+3. The first launch is blocked by macOS: you'll see *"DevNotifier is damaged
+   and can't be opened"* or *"cannot be opened because the developer cannot be
+   verified"*. *(This build is free and open‑source, so it isn't signed with a
+   paid Apple certificate — that's why macOS complains. It's safe.)* Fix it
+   once by opening **Terminal** (⌘‑Space, type `Terminal`) and pasting:
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/DevNotifier.app
+   ```
+   Then double‑click DevNotifier in Applications. *(Alternative without the
+   terminal: after the warning, go to **System Settings → Privacy & Security**
+   and click **Open Anyway**. On macOS 14 and earlier, right‑click → **Open** →
+   **Open** also works.)*
+4. The very first launch can take 10–20 seconds while macOS scans the app —
+   wait for the icon rather than double‑clicking again.
+5. If it asks to send notifications, click **Allow**. (This prompt appears
+   only once; if you miss it, see [Troubleshooting](#troubleshooting).)
 
 **Windows**
 1. Download the latest **`DevNotifier‑<version>‑setup.exe`** from
@@ -67,9 +80,13 @@ or the system tray (Windows, bottom‑right; click the ▲ arrow if it's hidden)
 
 ### Step 4 — Confirm it's working
 
-Click the icon → **Check dependencies**. The **Status** line should show
-**Jira ✓**. That's it — you'll now get a notification whenever a relevant Jira
-issue changes, and clicking it opens the issue.
+Click the icon → **Check dependencies**. This re‑reads the file you just saved
+and the **Status** menu should show **Jira: ✓ Ready**. Then click **Check now**
+to run a real check: if the token or address is wrong, Status will show the
+error next to Jira (e.g. *HTTP 401 unauthorized*) and a ⚠ appears beside the
+icon. If it says *Checked — no new items*, everything works — you'll now get a
+notification whenever a relevant Jira issue changes, and clicking it opens the
+issue.
 
 Don't want GitHub? In the config file set `"enabled": false` under `"github"`,
 save, and click **Check dependencies** again.
@@ -90,8 +107,12 @@ save, and click **Check dependencies** again.
   an hour before, at the start, and at the end), and the menu shows whether
   you're on‑call right now and your open incidents.
 
-Click any notification to open it in your browser. You can also reopen recent
-items from the **Recent** menu.
+Click any notification (or its **Open** button) to open it in your browser.
+You can also reopen recent items from the **Recent** menu.
+
+If a lot happens at once (first launch, back from a weekend), you get **one
+summary notification** ("12 new updates — see Recent") instead of a dozen
+pop‑ups; the individual items are all in **Recent**.
 
 ---
 
@@ -101,14 +122,16 @@ Click (macOS) or right‑click (Windows) the icon:
 
 | Item | What it does |
 |------|--------------|
-| **Check now** | Check right away instead of waiting for the timer |
-| **Status** | Shows whether Jira / GitHub / PagerDuty are ready |
-| **PagerDuty** | *(when enabled)* On‑call now / next shift, and your open incidents — click one to open it |
+| **Check now** | Check right away instead of waiting for the timer. Tells you if a source failed |
+| **Status ▸** | When the last check ran, and whether Jira / GitHub / PagerDuty are working. A failing source shows its error here (and a ⚠ badge appears next to the icon). Also **Re‑check now** and **View log** |
+| **PagerDuty ▸** | *(when enabled)* On‑call now / next shift, and your open incidents — click one to open it |
+| **Pause notifications ▸** | Mute pop‑ups for 1 hour / 4 hours / until you resume. Items still go to Recent; a ⏸ badge shows while paused |
 | **Recent** | The last items seen — reopen or remove them |
 | **Clear all recent** | Empty the recent list |
+| **Check for updates** / **Update available: x.y.z ▸** | Check GitHub Releases; when a newer version exists: **Download update…** (macOS) / **Download & Install** (Windows), **Release notes**, **Skip this version**. See [Updating](#updating) |
 | **Theme** | Change the icon color |
 | **Start at login** | Launch automatically when you sign in |
-| **Check dependencies** | Re‑check your setup and report any problems |
+| **Check dependencies** | Reload the config file and re‑check your setup; reports any problems |
 | **Open config file** | Edit your settings |
 | **Quit** | Exit the app |
 
@@ -154,15 +177,64 @@ Click the icon → **Start at login** to have Dev Notifier launch automatically
 when you sign in. Click it again to turn it off. Nothing is installed
 system‑wide, and it only affects your own user account.
 
+- **macOS** may show a one‑time *"Background Items Added"* notice — that's the
+  login entry being registered. Turn it on only after the app is in
+  **Applications** (the app refuses while running from the DMG, because that
+  location disappears when you eject the disk image). If you later move the
+  app, the entry is repaired automatically the next time you launch it.
+- **Windows** ticks the box for you if you left *"Start Dev Notifier when I
+  sign in"* on in the installer.
+
+---
+
+## Updating
+
+Dev Notifier checks GitHub Releases once a day (and via **Check for updates**).
+When a newer version exists the menu shows **Update available: x.y.z ▸** and a
+notification appears.
+
+- **macOS** — **Download update…** downloads the DMG, verifies its SHA‑256
+  against the release's `SHA256SUMS.txt` (the download is discarded if it can't
+  be verified) and opens it. Then: **Quit** Dev Notifier, drag the new app into
+  **Applications** and choose **Replace**, and launch it again. Because the
+  build is unsigned you will likely see the *"is damaged"* message again — run
+  the same `xattr -dr com.apple.quarantine /Applications/DevNotifier.app` line
+  from Step 1.
+- **Windows** — **Download & Install** downloads and verifies the installer and
+  launches it; the installer closes the running app, replaces it, and starts
+  the new version.
+- **Skip this version** hides that release until the next one.
+
 ---
 
 ## Troubleshooting
 
 **No notifications appear**
-- **macOS:** System Settings → Notifications → **DevNotifier** → set to *Allow*.
-  Turn off Do Not Disturb / Focus.
+- Check the menu: is **Pause notifications** active (a ⏸ next to the icon)?
+  Click **Resume notifications**.
+- Open **Status ▸**. If it shows a ⚠ next to a source, that source is failing
+  (wrong token, network, VPN) — the line tells you why. If **Last check** is
+  old or *not yet*, the app isn't polling; try **Check now**.
+- **macOS:** System Settings → Notifications → **DevNotifier** → *Allow
+  Notifications*. The "Allow?" prompt only appears once — if you dismissed it,
+  this is where to turn it on. Choose the **Alerts** style if you want
+  notifications to stay on screen until clicked (Banners disappear after a few
+  seconds). If you use a **Focus** mode, add DevNotifier to its *Allowed
+  Apps*.
 - **Windows:** Settings → System → **Notifications** → turn on *Dev Notifier*.
-  Turn off Focus assist / Do not disturb.
+  Turn off Focus assist / Do not disturb, or add Dev Notifier to its priority
+  list.
+
+**Status shows "⚠ HTTP 401 / 403" next to Jira or PagerDuty**
+- The token (or, for Jira, the email) is wrong or was revoked. Create a new
+  token, paste it into the config file, save, and click **Check dependencies**
+  → **Check now**.
+
+**Status shows "⚠ timed out" / "network error" / "TLS certificate verification failed"**
+- The app couldn't reach the service: check your network or VPN. Nothing is
+  lost — updates from the failed window are fetched on the next successful
+  check. *TLS certificate verification failed* usually means a corporate proxy
+  that inspects HTTPS; GitHub (via `gh`) keeps working, Jira/PagerDuty may not.
 
 **Status shows Jira isn't ready**
 - Open the config file and make sure `base_url`, `username`, and `api_token`
@@ -187,12 +259,28 @@ system‑wide, and it only affects your own user account.
   `"oncall_remind_before_minutes"` (e.g. `[60]` for just a one‑hour heads‑up).
 
 **Clicking a notification doesn't open anything**
-- Make sure you allowed notifications the first time. On Windows, also make sure
-  you have a default web browser set.
+- Click the notification's **Open** button (on macOS, hover over the banner to
+  reveal it) rather than dismissing it. Make sure you allowed notifications the
+  first time. On Windows, also make sure you have a default web browser set.
+
+**"Start at login" is on but the app doesn't start**
+- The app was moved after you turned it on, or you turned it on while running
+  from the DMG. Launch the app from **Applications** once (it repairs the
+  entry), or toggle **Start at login** off and on again.
+
+**Two icons / duplicate notifications**
+- Two copies are running (e.g. one from the DMG and one from Applications).
+  Quit both, eject the DMG, and launch only the copy in Applications.
+
+**The config file has a typo**
+- The **Status** menu shows *Config: ⚠ …* with the problem (e.g. an unknown
+  setting name or a value of the wrong type), and a note is written to the log.
+  Your file is never overwritten while it can't be read — fix the typo, save,
+  and click **Check dependencies**.
 
 **macOS says the app "is damaged"**
-- This is the unsigned‑build warning. See [Advanced](#advanced-optional) for the
-  one‑line fix, or right‑click → **Open** as in Step 1.
+- This is the unsigned‑build warning. Run the one‑line fix from Step 1 (also
+  under [Advanced](#advanced-optional)). You'll need it again after updates.
 
 ---
 
@@ -202,7 +290,7 @@ Everything below is for power users. A typical user never needs it.
 
 ### Run from source
 
-Requires Python 3.12+. Platform dependencies are picked automatically.
+Requires Python 3.9 or newer. Platform dependencies are picked automatically.
 
 **macOS**
 ```bash
@@ -227,9 +315,17 @@ python launcher.py
 ```
 Config   macOS:   ~/.config/dev-notifier/config.json
          Windows: %APPDATA%\dev-notifier\config.json
-Log      macOS:   ~/.config/dev-notifier/notifier.log
+State    macOS:   ~/.config/dev-notifier/state.json      (seen items, Recent, pause)
+         Windows: %APPDATA%\dev-notifier\state.json
+Log      macOS:   ~/.config/dev-notifier/notifier.log    (also: Status ▸ View log)
          Windows: %APPDATA%\dev-notifier\notifier.log
+Updates  macOS:   ~/Library/Caches/dev-notifier/          (downloaded installers)
+         Windows: %LOCALAPPDATA%\dev-notifier\
 ```
+
+The config file holds your API tokens in plain text; it is created readable by
+your user only. The log records the title of every notification (issue
+summaries, PR titles, incident names) — keep that in mind before sharing it.
 
 ### Advanced config fields
 
@@ -239,7 +335,7 @@ behaviour:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `poll.interval_seconds` | `300` | How often to check (seconds) |
+| `poll.interval_seconds` | `300` | How often to check (seconds, minimum 30). Takes effect on the next **Check dependencies** / poll — no restart needed |
 | `poll.window_minutes` | `1440` | How far back the first check looks |
 | `poll.max_window_minutes` | `10080` | Cap on the look‑back window (7 days) |
 | `jira.event_mode` | `true` | One notification per change/comment vs. per issue |
@@ -338,17 +434,32 @@ xattr -dr com.apple.quarantine /Applications/DevNotifier.app
 ### Uninstall
 
 **macOS**
-1. Quit from the menu, and turn off **Start at login**.
+1. Turn off **Start at login** first (while the app is still installed), then
+   **Quit** from the menu.
 2. Delete `/Applications/DevNotifier.app`.
-3. Optionally remove your data:
+3. If you deleted the app before turning off Start at login, remove the
+   leftover login entry by hand:
+   ```bash
+   launchctl unload ~/Library/LaunchAgents/ai.stevezou.devnotifier.plist 2>/dev/null
+   rm -f ~/Library/LaunchAgents/ai.stevezou.devnotifier.plist
+   ```
+4. Optionally remove your data (config with tokens, state, log, cached
+   downloads):
    ```bash
    rm -rf ~/.config/dev-notifier ~/Library/Caches/dev-notifier
    ```
+   The notification permission entry disappears from System Settings on its
+   own after a restart.
 
 **Windows**
-1. Quit from the tray menu, and turn off **Start at login**.
-2. Delete the `DevNotifier-<version>.exe` you downloaded.
+1. Turn off **Start at login**, then **Quit** from the tray menu.
+2. **Installed with the setup .exe:** Settings → Apps → **Dev Notifier** →
+   **Uninstall** (or use the uninstaller in the Start Menu folder).
+   **Portable .exe:** just delete the `DevNotifier-<version>-portable.exe`
+   file.
 3. Optionally remove your data:
    ```powershell
    Remove-Item -Recurse -Force "$env:APPDATA\dev-notifier", "$env:LOCALAPPDATA\dev-notifier"
    ```
+   If you deleted the exe before turning off Start at login, also remove the
+   stale entry: `reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v DevNotifier /f`

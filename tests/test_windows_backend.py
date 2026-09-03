@@ -362,41 +362,77 @@ def test_add_timer_returns_started_timer(backend):
     t.stop()  # cancel so nothing fires during the test
 
 
-def test_repeating_timer_fires_and_rearms(win_mod, monkeypatch):
-    # Drive _RepeatingTimer without real threads: capture the scheduled fn and
-    # invoke it manually, asserting it calls fn(None) and re-arms.
+class _FakeThreadingTimer:
     scheduled = []
 
-    class FakeThreadingTimer:
-        def __init__(self, interval, fn):
-            self.interval = interval
-            self.fn = fn
-            self.daemon = False
-            self.cancelled = False
+    def __init__(self, interval, fn):
+        self.interval = interval
+        self.fn = fn
+        self.daemon = False
+        self.cancelled = False
 
-        def start(self):
-            scheduled.append(self)
+    def start(self):
+        self.scheduled.append(self)
 
-        def cancel(self):
-            self.cancelled = True
+    def cancel(self):
+        self.cancelled = True
 
-    monkeypatch.setattr(win_mod.threading, "Timer", FakeThreadingTimer)
+
+def test_repeating_timer_fires_and_rearms(win_mod, monkeypatch):
+    # Drive _RepeatingTimer without real threads: capture the scheduled fn and
+    # invoke it manually, asserting it passes the timer itself as the sender
+    # (so one-shot handlers can call ``sender.stop()`` like on macOS) and
+    # re-arms.
+    _FakeThreadingTimer.scheduled = scheduled = []
+    monkeypatch.setattr(win_mod.threading, "Timer", _FakeThreadingTimer)
 
     calls = []
     t = win_mod._RepeatingTimer(lambda arg: calls.append(arg), 5)
     t.start()
     assert len(scheduled) == 1  # armed once
 
-    # Fire the scheduled callback -> fn(None) runs and the timer re-arms.
+    # Fire the scheduled callback -> fn(timer) runs and the timer re-arms.
     scheduled[0].fn()
-    assert calls == [None]
+    assert calls == [t]
     assert len(scheduled) == 2  # re-armed
 
     # After stop(), a pending fire does nothing and does not re-arm.
     t.stop()
     scheduled[1].fn()
-    assert calls == [None]  # fn not called again
+    assert calls == [t]  # fn not called again
     assert len(scheduled) == 2
+
+
+def test_repeating_timer_one_shot_handler_can_stop_itself(win_mod, monkeypatch):
+    """The app's startup handlers call ``sender.stop()``; on Windows this used
+    to raise (sender was None) on every fire and loop forever."""
+    _FakeThreadingTimer.scheduled = scheduled = []
+    monkeypatch.setattr(win_mod.threading, "Timer", _FakeThreadingTimer)
+    fired = []
+
+    def one_shot(sender):
+        sender.stop()
+        fired.append(1)
+
+    t = win_mod._RepeatingTimer(one_shot, 0.5)
+    t.start()
+    scheduled[0].fn()
+    assert fired == [1]
+    assert len(scheduled) == 1  # stopped inside the handler -> not re-armed
+
+
+def test_repeating_timer_survives_handler_exception(win_mod, monkeypatch):
+    _FakeThreadingTimer.scheduled = scheduled = []
+    monkeypatch.setattr(win_mod.threading, "Timer", _FakeThreadingTimer)
+
+    def boom(_):
+        raise RuntimeError("tick failed")
+
+    t = win_mod._RepeatingTimer(boom, 5)
+    t.start()
+    scheduled[0].fn()  # must not raise
+    assert len(scheduled) == 2  # still re-armed
+    t.stop()
 
 
 def test_repeating_timer_stop_before_fire(win_mod, monkeypatch):

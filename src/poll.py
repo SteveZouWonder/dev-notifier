@@ -14,10 +14,13 @@ seen) without notifying at all (e.g. a passing/pending CI roll-up).
 @author SteveZou
 """
 import base64
+import hashlib
 import json
 import re
+import socket
 import ssl
 import subprocess
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +32,63 @@ import deps as _deps
 def _log(msg: str) -> None:
     # Lazy import to avoid a hard dependency loop; app wires real logging.
     print(msg)
+
+
+# ---------------------------------------------------------------------------
+# Per-poll error tracking
+# ---------------------------------------------------------------------------
+#
+# Every fetch helper used to swallow its exception and return an empty result,
+# which made "the token is wrong" indistinguishable from "nothing happened".
+# Failures are now *also* recorded here (first error per source wins) so that
+# ``collect_all`` can hand them to the app via ``extra["errors"]``. The app uses
+# that to (a) show the problem in the Status menu, (b) tell the user on a
+# manual check, and (c) refuse to advance the poll cursor, so the events in
+# the failed window are fetched again next time instead of being lost.
+
+_errors = {}  # source ("jira" | "github" | "pagerduty") -> human-readable error
+
+_HTTP_HINTS = {
+    401: "unauthorized — check the API token / username",
+    403: "forbidden — token lacks permission or is rate-limited",
+    404: "not found — check base_url (Jira Cloud only)",
+    429: "rate limited — will retry next poll",
+}
+
+
+def describe_error(e) -> str:
+    """Short, user-facing description of a fetch exception."""
+    if isinstance(e, urllib.error.HTTPError):
+        hint = _HTTP_HINTS.get(e.code)
+        return f"HTTP {e.code}" + (f" {hint}" if hint else f" {e.reason}")
+    if isinstance(e, (socket.timeout, TimeoutError)):
+        return "timed out"
+    if isinstance(e, urllib.error.URLError):
+        reason = e.reason
+        text = str(reason)
+        if "CERTIFICATE_VERIFY_FAILED" in text:
+            return "TLS certificate verification failed (corporate proxy?)"
+        if isinstance(reason, (socket.timeout, TimeoutError)) or "timed out" in text:
+            return "timed out"
+        return f"network error: {text}"[:120]
+    if isinstance(e, subprocess.TimeoutExpired):
+        return "gh timed out"
+    return f"{type(e).__name__}: {e}"[:120]
+
+
+def _record_error(source: str, e) -> None:
+    """Remember the first failure for ``source`` in this poll."""
+    text = e if isinstance(e, str) else describe_error(e)
+    _errors.setdefault(source, text)
+
+
+def reset_errors() -> None:
+    _errors.clear()
+
+
+def poll_errors() -> dict:
+    """Errors recorded since the last ``reset_errors()`` (source -> text)."""
+    return dict(_errors)
 
 
 def _ssl_context() -> ssl.SSLContext:
@@ -112,6 +172,7 @@ def _jira_search(cfg: dict, window_min: int) -> list:
             return json.loads(resp.read().decode()).get("issues", [])
     except Exception as e:  # noqa: BLE001
         _log(f"ERROR jira_search: {e}")
+        _record_error("jira", e)
         return []
 
 
@@ -156,6 +217,10 @@ def _jira_myself(cfg: dict) -> str:
             _log(f"WARN jira_myself: {e}; reusing cached accountId")
             return cached[1]
         _log(f"ERROR jira_myself: {e}")
+        # No cached identity: self-suppression is off for this poll, so treat
+        # it as a failed poll (cursor not advanced) rather than notifying the
+        # user about their own changes.
+        _record_error("jira", e)
         return ""
     if account_id:
         _jira_myself_cache[cache_key] = (now, account_id)
@@ -210,6 +275,7 @@ def _jira_changelog(cfg: dict, key: str) -> list:
             return json.loads(resp.read().decode()).get("values", [])
     except Exception as e:  # noqa: BLE001
         _log(f"ERROR jira_changelog {key}: {e}")
+        _record_error("jira", e)
         return []
 
 
@@ -464,6 +530,8 @@ def gh_login(cfg: dict) -> str:
         ).stdout.strip()
     except Exception as e:  # noqa: BLE001
         _log(f"WARN gh login lookup failed: {e}")
+        if cfg.get("github", {}).get("enabled"):
+            _record_error("github", e)
         return ""
     if out:
         _gh_login_cache["login"] = out
@@ -676,7 +744,13 @@ def gh_notifications(cfg: dict, login: str = "") -> list:
     gh = cfg.get("github", {})
     if not gh.get("enabled"):
         return []
-    notifs = _gh_json(["api", "notifications"])
+    notifs = _gh_api(["api", "notifications"])
+    if notifs is _GH_FAIL:
+        _record_error("github", "could not fetch notifications via gh "
+                                "(run `gh auth status`)")
+        return []
+    if not isinstance(notifs, list):
+        notifs = []
     # Only look up the latest actor when we can compare it to a known login.
     suppress_self = gh.get("suppress_self", True) and bool(login)
     me = login.lower()  # GitHub logins are case-insensitive
@@ -715,12 +789,14 @@ def gh_notifications(cfg: dict, login: str = "") -> list:
         else:
             url = "https://github.com/notifications"
         items.append({
-            # Fingerprint on the thread id only. GitHub bumps ``updated_at`` on
-            # every new activity in a thread (comment, push, re-request), so
-            # including it would mint a fresh fingerprint each time and re-notify
-            # the same thread repeatedly. The id is stable for the life of the
-            # notification thread, so one notification per thread is emitted.
-            "fp": f"gh-notif:{n.get('id','')}",
+            # Fingerprint on thread id + ``updated_at``. GitHub bumps
+            # ``updated_at`` on every new activity in a thread (a new review,
+            # comment, push, re-request), and each of those *is* news the user
+            # asked for. Keying on the id alone meant a PR notified exactly once
+            # in its lifetime and every later review on it was silent. Your own
+            # activity does not re-notify: ``suppress_self`` above skips threads
+            # whose latest actor is you.
+            "fp": f"gh-notif:{n.get('id','')}:{n.get('updated_at','')}",
             "title": "GitHub",
             "subtitle": f"{repo} · {REASON_LABEL.get(reason, reason)}",
             "message": subj.get("title", ""),
@@ -735,8 +811,12 @@ def _ci_rollup_for_pr(pr: dict):
     if not m:
         return None
     repo, num = m.group(1), m.group(2)
-    checks = _gh_json(["pr", "checks", num, "--repo", repo, "--json", "state,bucket"])
-    buckets = [c.get("bucket", "") for c in checks] if checks else []
+    checks = _gh_json(["pr", "checks", num, "--repo", repo,
+                       "--json", "state,bucket,link"])
+    if not isinstance(checks, list):
+        checks = []
+    checks = [c for c in checks if isinstance(c, dict)]
+    buckets = [c.get("bucket", "") for c in checks]
     if "fail" in buckets:
         rollup, emoji = "fail", "\u274c"
     elif "pending" in buckets:
@@ -745,8 +825,16 @@ def _ci_rollup_for_pr(pr: dict):
         rollup, emoji = "pass", "\u2705"
     else:
         return None
+    # Identify *this* run of the checks. A fingerprint of (PR, roll-up) alone
+    # meant that once a PR had failed CI, no later failure on it (after another
+    # push, or a re-run) ever notified again. Each check's ``link`` points at a
+    # concrete run (e.g. .../actions/runs/<id>/job/<id>), so hashing the links
+    # distinguishes runs while staying stable across polls of the same run.
+    links = sorted(str(c.get("link") or "") for c in checks if c.get("link"))
+    run_id = hashlib.sha1("\n".join(links).encode()).hexdigest()[:10] if links else ""
+    fp = f"gh-ci:{repo}#{num}:{rollup}" + (f":{run_id}" if run_id else "")
     return {
-        "fp": f"gh-ci:{repo}#{num}:{rollup}",
+        "fp": fp,
         "title": "GitHub CI",
         "subtitle": f"{repo} · PR #{num}",
         "message": f"{emoji} CI {rollup}: {pr.get('title', '')}",
@@ -771,11 +859,14 @@ def gh_ci_fallback(cfg: dict, login: str) -> list:
     gh = cfg.get("github", {})
     if not (gh.get("enabled") and login):
         return []
-    prs = _gh_json([
+    prs = _gh_api([
         "search", "prs", f"--author={login}", "--state=open",
         "--json", "title,url,number,repository", "--limit", "30",
     ])
-    if not prs:
+    if prs is _GH_FAIL:
+        _record_error("github", "could not list your open PRs via gh")
+        return []
+    if not prs or not isinstance(prs, list):
         return []
     notify = set(gh.get("ci_notify", _CI_NOTIFY_DEFAULT) or [])
     items = []
@@ -864,6 +955,7 @@ def _pd_get(token: str, path: str, params=None):
             return json.loads(resp.read().decode())
     except Exception as e:  # noqa: BLE001
         _log(f"ERROR pagerduty GET {path}: {e}")
+        _record_error("pagerduty", e)
         return {}
 
 
@@ -1296,31 +1388,69 @@ def resolve_window_minutes(cfg: dict, since_ts=None, now_ts=None) -> int:
     return int(round(window))
 
 
-def collect_all(cfg: dict, log=None, since_ts=None, extra=None):
-    """Yield item lists in priority order (fast sources first).
+def _guarded(source: str, fn, *args, **kwargs):
+    """Run one source's fetch; an unexpected exception becomes a recorded
+    error for that source instead of aborting the whole poll (the other
+    sources' results are kept)."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        _log(f"ERROR {source}: {type(e).__name__}: {e}")
+        _record_error(source, e)
+        return []
 
-    Returns a list of (phase_name, items) so the caller can notify
-    incrementally. `log` is an optional callable(str). `since_ts` is the epoch
-    timestamp of the previous poll; the lookback window spans from it to now
-    (capped by ``poll.max_window_minutes``). See ``resolve_window_minutes``.
+
+def _github_phases(cfg: dict):
+    """GitHub notifications + CI roll-up (share one login lookup)."""
+    if not cfg.get("github", {}).get("enabled"):
+        return [], []
+    login = gh_login(cfg)
+    return (_guarded("github", gh_notifications, cfg, login),
+            _guarded("github", gh_ci_fallback, cfg, login))
+
+
+def collect_all(cfg: dict, log=None, since_ts=None, extra=None):
+    """Fetch every source and return ``[(phase_name, items), ...]``.
+
+    `log` is an optional callable(str). `since_ts` is the epoch timestamp of
+    the previous poll; the lookback window spans from it to now (capped by
+    ``poll.max_window_minutes``). See ``resolve_window_minutes``.
+
+    The three independent sources (Jira, GitHub, PagerDuty) are fetched
+    concurrently so a slow one does not delay the others, and each is isolated:
+    an unexpected exception in one is recorded as that source's error and the
+    remaining results are still returned.
 
     ``extra`` (optional dict) receives non-notification side data for the
-    menu: ``extra["pagerduty"]`` = on-call summary + open incidents assigned
-    to you (see ``pagerduty_items``).
+    menu:
+
+    - ``extra["pagerduty"]`` = on-call summary + open incidents assigned to
+      you (see ``pagerduty_items``);
+    - ``extra["errors"]`` = ``{source: text}`` for every source whose fetch
+      failed this poll (see ``describe_error``). Empty when all went well.
     """
     global _log
     if log:
         _log = log
+    reset_errors()
     window_min = resolve_window_minutes(cfg, since_ts)
     _log(f"poll window: {window_min} min")
-    login = gh_login(cfg)
     pd_status = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_jira = pool.submit(_guarded, "jira", jira_items, cfg, window_min)
+        f_gh = pool.submit(_github_phases, cfg)
+        f_pd = pool.submit(_guarded, "pagerduty", pagerduty_items, cfg,
+                           window_min, status=pd_status)
+        jira = f_jira.result()
+        gh_items, ci_items = f_gh.result()
+        pd = f_pd.result()
     phases = [
-        ("jira", jira_items(cfg, window_min)),
-        ("github", gh_notifications(cfg, login)),
-        ("ci", gh_ci_fallback(cfg, login)),
-        ("pagerduty", pagerduty_items(cfg, window_min, status=pd_status)),
+        ("jira", jira),
+        ("github", gh_items),
+        ("ci", ci_items),
+        ("pagerduty", pd),
     ]
     if extra is not None:
         extra["pagerduty"] = pd_status
+        extra["errors"] = poll_errors()
     return phases

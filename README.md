@@ -7,7 +7,7 @@
 ### A tiny macOS & Windows tray app that watches Jira, GitHub & PagerDuty for things relevant to you and shows clickable desktop notifications
 
 [![Release](https://img.shields.io/github/v/release/SteveZouWonder/dev-notifier)](../../releases)
-[![Python](https://img.shields.io/badge/python-3.12-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/)
 
 [Download](#download--install) · [Configure](#configuration) · [Tutorial](TUTORIAL.md) · [Build from source](#build-from-source)
 
@@ -41,12 +41,24 @@ native Action Center toasts via `winotify`.
 ### macOS
 
 1. Grab the latest `DevNotifier-<version>.dmg` from
-   [Releases](../../releases).
-2. Open the DMG and drag **DevNotifier.app** to Applications.
-3. This is an unsigned open-source build, so the first launch needs:
-   **right-click DevNotifier → Open → Open**. (If it says "is damaged", run
-   `xattr -dr com.apple.quarantine /Applications/DevNotifier.app`.)
-4. Allow notifications when prompted.
+   [Releases](../../releases). The build is **Apple Silicon (arm64)**; Intel
+   Macs are not supported by the prebuilt DMG (build from source instead).
+2. Open the DMG and drag **DevNotifier.app** to Applications. Don't run it
+   from inside the DMG window — **Start at login** needs the app in
+   Applications.
+3. This is an unsigned open-source build, so macOS blocks the first launch
+   ("DevNotifier is damaged and can't be opened" / "cannot be opened because
+   the developer cannot be verified"). Clear the quarantine flag once:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/DevNotifier.app
+   ```
+
+   Alternatively: try to open it, then **System Settings → Privacy &
+   Security → Open Anyway**. (On macOS 14 and earlier, right-click → Open →
+   Open also works.) You will need to do this again after each update.
+4. Allow notifications when prompted. The first launch can take 10–20 s while
+   macOS scans the app; the ⚡ icon appears when it's ready.
 
 ### Windows
 
@@ -105,25 +117,38 @@ and the full list of advanced options, see the **[Tutorial](TUTORIAL.md)**.
 
 ## Menu
 
-- **Check now** — poll immediately (manual pull).
-- **Status:** — shows whether Jira / GitHub / PagerDuty are ready; click to re-check.
+- **Check now** — poll immediately (manual pull). If a source fails (bad
+  token, network down) you're told which one and why — never a false "all
+  caught up".
+- **Status ▸** — when the last check ran and whether Jira / GitHub / PagerDuty
+  are working. A failing source shows its error here (and a ⚠ badge appears
+  next to the tray icon) until it recovers. Also **Re-check now** and
+  **View log**.
 - **PagerDuty ▸** *(when enabled)* — whether you're on‑call right now (and until
   when) or when your next shift starts, plus your open incidents; click one to
   open it.
+- **Pause notifications ▸** — mute pop-ups for 1 h / 4 h / until you resume
+  (items still land in Recent; a ⏸ badge shows while paused).
 - **Recent:** — the last items seen; hover → **Open** / **Remove**.
 - **Clear all recent** — empty the list.
+- **Check for updates** / **Update available: x.y.z ▸** — download the new
+  release (SHA-256 verified). On macOS this opens the DMG for you to
+  drag-replace; on Windows it runs the installer.
 - **Theme ▸** — switch the tray icon color.
 - **Start at login** — toggle auto-start (macOS: a LaunchAgent; Windows: a
   per-user `Run` registry entry).
-- **Check dependencies** — re-run the gh / Jira / PagerDuty checks.
+- **Check dependencies** — reload `config.json` and re-run the gh / Jira /
+  PagerDuty checks (use this after editing the file).
 - **Open config file** — edit your settings.
 - **Quit**.
 
 ### Dependency checks
 
 On startup the app verifies the `gh` CLI (installed + logged in), your Jira
-config, and your PagerDuty token, showing the result in the **Status:** line and
-guiding you if something is missing. You can also run the standalone doctor:
+config, and your PagerDuty token, showing the result in the **Status ▸**
+submenu and guiding you if something is missing. Credentials are only proven
+by the first real poll: if Jira/PagerDuty reject them, Status shows the HTTP
+error next to that source. You can also run the standalone doctor (macOS):
 
 ```bash
 bash scripts/doctor.sh
@@ -132,16 +157,17 @@ bash scripts/doctor.sh
 ### Start at login
 
 Enable **Start at login** to auto-launch on login. On macOS it writes a per-user
-LaunchAgent to `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist`; on Windows
-it adds a per-user value under
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Toggling it off removes the
-entry. Nothing is installed system-wide.
+LaunchAgent to `~/Library/LaunchAgents/ai.stevezou.devnotifier.plist` (macOS
+may show a "Background Items Added" notice); on Windows it adds a per-user
+value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. Toggling
+it off removes the entry. Nothing is installed system-wide. If you move the app
+later, the registration is repaired automatically on the next launch.
 
 See the full [Tutorial](TUTORIAL.md) for setup, troubleshooting, and uninstall.
 
 ## Build from source
 
-Requires Python 3.12+. Platform dependencies (`rumps` on macOS; `pystray` +
+Requires Python 3.9+ (CI tests 3.9–3.12). Platform dependencies (`rumps` on macOS; `pystray` +
 `Pillow` + `winotify` on Windows) are selected automatically by
 `requirements.txt` markers.
 
@@ -180,6 +206,21 @@ pwsh packaging/windows_package.ps1
 # -> dist/DevNotifier-1.0.0-setup.exe, dist/DevNotifier-1.0.0-portable.exe
 # (set $env:DEVNOTIFIER_SKIP_INSTALLER = "1" to skip the Inno Setup step)
 ```
+
+## Known limitations
+
+- **Unsigned builds.** No Developer ID / notarization, so macOS Gatekeeper and
+  Windows SmartScreen warn on first launch and after each update (see above).
+- **Apple Silicon only** DMG; Intel users must build from source.
+- **Jira Cloud only** (REST API v3 + email/API-token auth). Jira Server / Data
+  Center is not supported.
+- **PagerDuty US region only** (`api.pagerduty.com`); EU-region accounts are
+  not yet supported.
+- **GitHub.com only**; GitHub Enterprise Server links are not rewritten.
+- GitHub needs the `gh` CLI installed and logged in.
+- Behind a TLS-intercepting corporate proxy, Jira/PagerDuty calls verify
+  against the bundled `certifi` CA bundle and may fail; Status will show
+  "TLS certificate verification failed".
 
 ## Releasing
 

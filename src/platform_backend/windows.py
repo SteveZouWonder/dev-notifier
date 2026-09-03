@@ -84,8 +84,12 @@ def _launch_command() -> str:
 class _RepeatingTimer(Timer):
     """A repeating timer built on ``threading.Timer``, re-armed on each fire.
 
-    ``fn`` is called with a single positional ``None`` to match the callback
-    signature the app's timer handlers expect.
+    ``fn`` is called with the timer itself as its single positional argument,
+    matching rumps (which passes the ``rumps.Timer``) so one-shot handlers can
+    call ``sender.stop()``. Passing ``None`` here used to make every startup
+    handler raise ``AttributeError`` on each fire — and, because the timer
+    re-arms in ``finally``, loop forever without the first dependency/update
+    check ever running.
     """
 
     def __init__(self, fn, interval_s):
@@ -98,7 +102,9 @@ class _RepeatingTimer(Timer):
         if self._stopped:
             return
         try:
-            self._fn(None)
+            self._fn(self)
+        except Exception:  # noqa: BLE001 - a failing tick must not kill the timer
+            pass
         finally:
             if not self._stopped:
                 self._arm()
