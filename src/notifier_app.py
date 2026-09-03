@@ -605,8 +605,12 @@ class NotifierApp:
             line = "On-call now"
             if until:
                 line += f" until {until}"
+            else:
+                # No end: a direct escalation-policy target, not a schedule.
+                line += " (no end — direct policy target)"
             if s.get("schedule"):
                 line += f" ({s['schedule']})"
+            link = s.get("url", "")
         else:
             line = "Not on-call"
             nxt = poll_mod.pd_format_time(s.get("next_start"))
@@ -614,7 +618,12 @@ class NotifierApp:
                 line += f" · next: {nxt}"
                 if s.get("next_schedule"):
                     line += f" ({s['next_schedule']})"
-        parent.add(MenuItem(line, callback=None))
+            link = s.get("next_url", "")
+        # Clicking the line opens the schedule / escalation policy in PagerDuty
+        # so the user can see *why* they are (or are not) on-call.
+        shift_item = MenuItem(line, callback=self._open_pd_incident if link else None)
+        shift_item.url = link
+        parent.add(shift_item)
         parent.add(MenuItem.sep())
         if not active:
             parent.add(MenuItem("No open incidents assigned to you",

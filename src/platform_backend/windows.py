@@ -81,6 +81,30 @@ def _launch_command() -> str:
     return f'"{sys.executable}" "{launcher}"'
 
 
+def _make_action(cb, item):
+    """Adapt an app callback (``fn(sender)``) to pystray's ``fn(icon, item)``.
+
+    pystray validates the callback with ``__code__.co_argcount`` and raises
+    ``ValueError`` unless it is exactly 0, 1 or 2 — *including* parameters
+    that have defaults. A ``lambda icon, it, _cb=cb, _item=item:`` therefore
+    counted as four arguments and made every menu build crash at startup on
+    Windows. Bind the closure over ``cb``/``item`` instead, so the resulting
+    function has exactly two positional parameters. The neutral ``item`` is
+    passed as the sender so tag attributes (``entry_id``, ``theme_name``, ...)
+    reach the handler.
+    """
+    def action(icon, pystray_item):
+        cb(item)
+    return action
+
+
+def _make_checked(state):
+    """``checked`` predicate for pystray (called with the pystray item)."""
+    def checked(pystray_item):
+        return bool(state)
+    return checked
+
+
 class _RepeatingTimer(Timer):
     """A repeating timer built on ``threading.Timer``, re-armed on each fire.
 
@@ -191,12 +215,9 @@ class WindowsBackend(TrayBackend):
             return pystray.MenuItem(item.title, submenu)
 
         cb = item.callback
-        # pystray invokes callbacks as fn(icon, item); the app's handlers take a
-        # single "sender" argument, so adapt by passing the neutral item through.
-        action = (lambda icon, _it, _cb=cb, _item=item: _cb(_item)) if cb else None
         return pystray.MenuItem(
-            item.title, action,
-            checked=(lambda _it, _s=item.state: bool(_s)) if item.state else None,
+            item.title, _make_action(cb, item) if cb else None,
+            checked=_make_checked(item.state) if item.state else None,
             enabled=cb is not None,
         )
 

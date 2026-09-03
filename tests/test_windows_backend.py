@@ -343,6 +343,29 @@ def test_set_menu_translates_items(backend, fake_pystray, fake_pil):
     assert menu.items[3].checked(None) is True
 
 
+def test_menu_callbacks_satisfy_pystray_arity(win_mod):
+    """Real pystray raises ValueError unless ``__code__.co_argcount`` is 0, 1
+    or 2 — parameters with defaults count. The previous
+    ``lambda icon, it, _cb=cb, _item=item`` had four and crashed every menu
+    build at startup on Windows."""
+    cb = lambda sender: None  # noqa: E731
+    action = win_mod._make_action(cb, object())
+    assert action.__code__.co_argcount == 2
+    checked = win_mod._make_checked(1)
+    assert checked.__code__.co_argcount == 1
+    assert checked(None) is True
+    assert win_mod._make_checked(0)(None) is False
+
+
+def test_fake_pystray_rejects_over_arity_actions(fake_pystray):
+    """Guard the guard: the stub must reject what real pystray rejects."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        fake_pystray.MenuItem("x", lambda icon, it, a=1, b=2: None)
+    fake_pystray.MenuItem("ok", lambda icon, it: None)  # 2 args fine
+    fake_pystray.MenuItem("sub", fake_pystray.Menu())    # submenu fine
+
+
 def test_menu_callback_adapts_signature(backend, fake_pystray, fake_pil):
     from platform_backend.base import MenuItem
     backend.setup(name="D", icon=None)

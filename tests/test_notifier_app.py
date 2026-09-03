@@ -1239,13 +1239,33 @@ def test_pagerduty_menuitem_not_on_call_with_next(app, app_mod):
 
 
 def test_pagerduty_menuitem_minimal_fields(app):
-    # Permanent on-call (no end) and no schedule name / no next shift.
+    # Permanent on-call (no end) is called out as a direct policy target so the
+    # user understands why there is no end time; no schedule name / next shift.
     app.cfg["pagerduty"] = {"enabled": True}
     app.pd_status = {"on_call": True, "until": None, "schedule": "",
                      "next_start": None, "active_incidents": []}
-    assert _pd_children(app._pagerduty_menuitem())[0] == "On-call now"
+    line = app._pagerduty_menuitem().children[0]
+    assert line.title == "On-call now (no end — direct policy target)"
+    assert line.callback is None  # no url -> not clickable
     app.pd_status = {"on_call": False, "next_start": None}
     assert _pd_children(app._pagerduty_menuitem())[0] == "Not on-call"
+
+
+def test_pagerduty_menuitem_shift_line_opens_schedule(app):
+    app.cfg["pagerduty"] = {"enabled": True}
+    app.pd_status = {"on_call": True, "until": "2026-07-02T18:00:00+00:00",
+                     "schedule": "Primary", "url": "https://pd/schedules/PS1",
+                     "active_incidents": []}
+    line = app._pagerduty_menuitem().children[0]
+    assert line.url == "https://pd/schedules/PS1"
+    line.callback(line)
+    assert app.backend.opened_urls[-1] == "https://pd/schedules/PS1"
+    # Not on-call: the line links to the *next* shift's schedule.
+    app.pd_status = {"on_call": False, "next_start": "2026-07-03T09:00:00+00:00",
+                     "next_schedule": "Primary", "next_url": "https://pd/schedules/PS2"}
+    line = app._pagerduty_menuitem().children[0]
+    line.callback(line)
+    assert app.backend.opened_urls[-1] == "https://pd/schedules/PS2"
 
 
 def test_pagerduty_menuitem_caps_listed_incidents(app):

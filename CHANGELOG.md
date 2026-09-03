@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - the "setup needed" / "Nothing to check" / dependency-check notifications carry an **Open** button that opens `config.json`
 - macOS: if the app was moved since **Start at login** was enabled, the LaunchAgent is re-pointed at the current location on the next launch; enabling it while running from the mounted DMG is refused with an explanation (that path vanishes when the image is ejected); failures to toggle it are reported instead of silently leaving the checkbox unchanged
 - `poll.interval_seconds` edits take effect on the next config reload (no relaunch)
+- `pagerduty.oncall_max_level` (default `1`): only escalation levels up to this count as "on-call" for the PagerDuty ▸ menu and the shift reminders. The **PagerDuty ▸** shift line now opens the schedule / escalation policy it refers to, and a schedule-less "direct policy target" is labelled as such
 - pre-release builds: tagging `vX.Y.Z-<suffix>` (e.g. `v2.0.0-beta`) publishes a GitHub **pre-release**, which is excluded from `/releases/latest` so existing installs are not offered it by the in-app updater; the CHANGELOG `[Unreleased]` section is left in place for the final release. The updater now ranks a pre-release below its final version, so `2.0.0-beta` users are offered `2.0.0` (and `2.0.0` users are never offered the beta)
 
 ### Changed
@@ -62,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Windows: the two startup one-shot timers (first dependency check, first update check) call `sender.stop()`, but the Windows timer passed `None` as the sender, so both raised `AttributeError` on every fire — re-arming forever — and the startup check never ran (Status stuck on "Checking…", no "setup needed" hint, no update check). The Windows timer now passes itself as the sender, matching rumps, and a failing tick no longer kills the timer
 - an unexpected exception inside the poll worker (e.g. a malformed `gh` payload) left the app stuck in "Checking…" — **Check now** greyed out and the spinner icon shown until relaunch — with the traceback lost on stderr. It is now logged, shown in Status ▸, and the UI state is restored
 - the stale `updater.__version__` (`1.3.0`) is now `1.5.8` so source runs report a sensible version
+- **Windows: the app crashed at startup** (`ValueError` from `pystray` in `set_menu`). pystray only accepts menu callbacks with 0–2 positional parameters by `__code__.co_argcount`, and the adapter lambda carried two extra default-valued parameters. Callbacks are now built as two-argument closures; the `fake_pystray` test stub enforces the same rule so this cannot regress
+- PagerDuty on-call status showed you as on-call when you were only the level-2/3 fallback on an escalation policy: `/oncalls` returns every level you sit on, and a schedule-less "direct target" entry took precedence over (and could never be replaced by) a real scheduled shift. Deeper levels are now ignored by default (`pagerduty.oncall_max_level`), scheduled shifts win over direct targets regardless of the order PagerDuty returns them, and levels > 1 are labelled `· level N` when enabled
 
 ## [v1.5.8] - 2026-07-15
 

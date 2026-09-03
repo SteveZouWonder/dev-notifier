@@ -1279,32 +1279,45 @@ def _pd_oncall_items(pd: dict, token: str, user_id: str, window_start, now,
               ("since", window_start.isoformat()),
               ("until", (now + timedelta(minutes=horizon)).isoformat())]
     oncalls = _pd_get_all(token, "/oncalls", params, "oncalls", max_pages=2)
+    max_level = _pd_oncall_max_level(pd)
 
     items = []
     seen = set()
-    current = None   # (end_dt or None, name)
-    upcoming = None  # (start_dt, name)
+    current = None   # (end_dt or None, name, url, level)
+    upcoming = None  # (start_dt, name, url, level)
     for oc in oncalls:
+        # ``/oncalls`` lists *every* escalation level you sit on. PagerDuty's
+        # own "ON CALL NOW" only shows level 1; being the level-3 fallback on
+        # a policy is not what anyone means by "I'm on-call", so deeper levels
+        # are ignored unless ``oncall_max_level`` is raised.
+        level = _pd_level(oc)
+        if level > max_level:
+            continue
         sched = oc.get("schedule") or {}
         pol = oc.get("escalation_policy") or {}
         name = sched.get("summary") or pol.get("summary") or "on-call"
+        if level > 1:
+            name = f"{name} · level {level}"
         url = sched.get("html_url") or pol.get("html_url") or ""
         start = _parse_dt(oc.get("start"))
         end = _parse_dt(oc.get("end"))
         if start is None or end is None:
-            # Directly on an escalation policy level: always on-call.
+            # A direct user target on the escalation policy (no schedule):
+            # on-call indefinitely. A schedule-based shift is the more useful
+            # thing to show (it has an end time), so this only fills in when
+            # nothing else does — and a later scheduled shift may replace it.
             if current is None:
-                current = (None, name)
+                current = (None, name, url, level)
             continue
         key = (sched.get("id") or pol.get("id") or "", oc.get("start"))
         if key in seen:
             continue
         seen.add(key)
-        if start <= now < end and (current is None or
-                                   (current[0] is not None and end > current[0])):
-            current = (end, name)
+        if start <= now < end and (current is None or current[0] is None
+                                   or end > current[0]):
+            current = (end, name, url, level)
         elif start > now and (upcoming is None or start < upcoming[0]):
-            upcoming = (start, name)
+            upcoming = (start, name, url, level)
 
         base = f"pd-oncall:{key[0]}:{oc.get('start', '')}"
         span = f"{pd_format_time(start)} – {pd_format_time(end)}"
@@ -1329,10 +1342,35 @@ def _pd_oncall_items(pd: dict, token: str, user_id: str, window_start, now,
             status["on_call"] = True
             status["until"] = current[0].isoformat() if current[0] else None
             status["schedule"] = current[1]
+            status["url"] = current[2]
+            status["level"] = current[3]
         if upcoming is not None:
             status["next_start"] = upcoming[0].isoformat()
             status["next_schedule"] = upcoming[1]
+            status["next_url"] = upcoming[2]
     return items
+
+
+_PD_ONCALL_MAX_LEVEL_DEFAULT = 1
+
+
+def _pd_oncall_max_level(pd: dict) -> int:
+    """``pagerduty.oncall_max_level`` (default 1): deepest escalation level
+    that still counts as "on-call". Invalid values fall back to the default."""
+    try:
+        level = int(pd.get("oncall_max_level", _PD_ONCALL_MAX_LEVEL_DEFAULT))
+    except (TypeError, ValueError):
+        return _PD_ONCALL_MAX_LEVEL_DEFAULT
+    return level if level >= 1 else _PD_ONCALL_MAX_LEVEL_DEFAULT
+
+
+def _pd_level(oncall: dict) -> int:
+    """``escalation_level`` of an ``/oncalls`` entry (1 when missing/odd)."""
+    try:
+        level = int(oncall.get("escalation_level", 1))
+    except (TypeError, ValueError):
+        return 1
+    return level if level >= 1 else 1
 
 
 def pagerduty_items(cfg: dict, window_min: int, status=None) -> list:

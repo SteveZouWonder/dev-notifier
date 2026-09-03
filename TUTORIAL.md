@@ -252,6 +252,15 @@ notification appears.
 - You turned PagerDuty on but didn't paste a token. Add one (see
   [PagerDuty](#pagerduty)) or set `"enabled": false` to turn it back off.
 
+**PagerDuty menu says I'm on‑call but PagerDuty shows someone else**
+- Click the *On‑call now (…)* line — it opens the schedule or escalation
+  policy the app is looking at. If the line says *no end — direct policy
+  target*, you are listed directly on that escalation policy (not via a
+  rotation). By default only **level 1** counts; if you still see this, you are
+  a level‑1 direct target on that policy — ask the policy owner, or check the
+  policy page. To also be told about deeper fallback levels set
+  `"oncall_max_level": 2` (or higher).
+
 **Too many PagerDuty notifications**
 - Add `"notify_team_incidents": false` under `"pagerduty"` to only hear about
   incidents assigned to you (and escalations / responder requests aimed at you).
@@ -350,6 +359,7 @@ behaviour:
 | `pagerduty.low_urgency_sound` | `false` | Play a sound for low‑urgency incidents too (they're silent by default) |
 | `pagerduty.oncall_reminders` | `true` | Notify before / at the start / at the end of your on‑call shifts |
 | `pagerduty.oncall_remind_before_minutes` | `[1440, 60]` | How long before a shift to send a heads‑up (minutes; one per entry) |
+| `pagerduty.oncall_max_level` | `1` | Deepest escalation level that counts as "on‑call". PagerDuty lists every level you sit on; by default only level 1 (what PagerDuty's own *On call now* shows) counts. Set `2` or `3` to also be told when you're the fallback; such entries are labelled `· level N` |
 | `update.enabled` | `true` | Auto‑check GitHub Releases for a newer version |
 | `update.check_interval_hours` | `24` | How often to check for a newer version (hours) |
 | `update.skipped_version` | `""` | App‑managed. Set by **Skip this version**; normally you don't edit it |
@@ -391,7 +401,8 @@ comments, so the meaning of each field is in the table above.)
     "notify_team_incidents": true,
     "low_urgency_sound": false,
     "oncall_reminders": true,
-    "oncall_remind_before_minutes": [1440, 60]
+    "oncall_remind_before_minutes": [1440, 60],
+    "oncall_max_level": 1
   },
   "poll": {
     "interval_seconds": 300,
