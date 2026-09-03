@@ -41,7 +41,7 @@ DEFAULT_CONFIG = {
         "suppress_automation": True,
     },
     "github": {
-        "enabled": True,
+        "enabled": False,
         "login": "",
         "suppress_self": True,
         "ci_notify": ["fail"],
@@ -93,10 +93,10 @@ _TEMPLATE = {
                  "hidden).",
     },
     "github": {
-        "enabled": True,
+        "enabled": False,
         "login": "",
-        "_note": "No token needed — uses the 'gh' CLI. Leave login blank to "
-                 "auto-detect. Set enabled to false if you don't use GitHub. "
+        "_note": "Optional. Set enabled to true to turn GitHub on. No token "
+                 "needed — uses the 'gh' CLI. Leave login blank to auto-detect. "
                  "Add \"suppress_self\": false to also be notified of activity "
                  "you triggered yourself (on by default = hidden).",
     },

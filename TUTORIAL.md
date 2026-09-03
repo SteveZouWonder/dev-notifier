@@ -88,8 +88,8 @@ icon. If it says *Checked — no new items*, everything works — you'll now get
 notification whenever a relevant Jira issue changes, and clicking it opens the
 issue.
 
-Don't want GitHub? In the config file set `"enabled": false` under `"github"`,
-save, and click **Check dependencies** again.
+GitHub is off by default. To add it, see
+[Add more sources → GitHub](#github).
 
 ---
 
@@ -150,10 +150,8 @@ This step does need a terminal once.
      <https://cli.github.com>), then open a **new** terminal window.
 2. Sign in once: run `gh auth login`, choose **GitHub.com → HTTPS**, and finish
    in the browser.
-3. Back in Dev Notifier, click **Check dependencies** — GitHub should show ✓.
-
-If you'd rather not use GitHub at all, set `"enabled": false` under `"github"`
-in the config file.
+3. In the config file set `"enabled": true` under `"github"` and save.
+4. Back in Dev Notifier, click **Check dependencies** — GitHub should show ✓.
 
 ### PagerDuty
 
