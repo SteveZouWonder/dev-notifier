@@ -389,9 +389,23 @@ def fake_pystray():
     class _MenuItem:
         def __init__(self, title, action=None, checked=None, enabled=True):
             self.title = title
-            self.action = action
+            self.action = self._assert_action(action)
             self.checked = checked
             self.enabled = enabled
+
+        @staticmethod
+        def _assert_action(action):
+            """Mirror real pystray: a callback must take 0, 1 or 2 positional
+            parameters by ``__code__.co_argcount`` (defaults count!), else
+            ``ValueError``. Submenus (``_Menu``) and ``None`` pass through.
+            The old stub accepted anything, which hid a startup crash on
+            Windows for every release since the backend refactor."""
+            if action is None or not hasattr(action, "__code__"):
+                return action
+            argcount = action.__code__.co_argcount
+            if argcount > 2:
+                raise ValueError(action)
+            return action
 
     class _Icon:
         def __init__(self, name, icon=None, title=None, menu=None):

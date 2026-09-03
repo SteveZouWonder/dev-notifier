@@ -2291,21 +2291,139 @@ def test_pagerduty_oncall_dedupes_same_shift_and_picks_latest_end(poll_mod,
     assert status["schedule"] == "Secondary"  # the one ending last wins
 
 
-def test_pagerduty_oncall_permanent_does_not_override_shift(poll_mod, monkeypatch,
-                                                            sample_cfg):
+def test_pagerduty_oncall_scheduled_shift_beats_permanent_target(poll_mod,
+                                                                  monkeypatch,
+                                                                  sample_cfg):
+    """A schedule-based shift (which has an end time) is the useful thing to
+    show; a direct policy target only fills in when there is no shift —
+    regardless of the order PagerDuty returns them in."""
     now = datetime.now(timezone.utc)
-    perm = {"schedule": None, "escalation_policy": {"id": "P", "summary": "Ops"},
+    perm = {"schedule": None,
+            "escalation_policy": {"id": "P", "summary": "Ops",
+                                  "html_url": "https://acme.pagerduty.com/ep/P"},
             "start": None, "end": None}
     shift = _oncall(now - timedelta(hours=1), now + timedelta(hours=1))
-    _pd_router(poll_mod, monkeypatch, oncalls=[shift, perm])
-    status = {}
-    poll_mod.pagerduty_items(sample_cfg, 10, status)
-    assert status["schedule"] == "Primary" and status["until"] is not None
-    # Reverse order: the permanent entry is kept (a timed shift can't beat None).
-    _pd_router(poll_mod, monkeypatch, oncalls=[perm, shift])
+    for order in ([shift, perm], [perm, shift]):
+        _pd_router(poll_mod, monkeypatch, oncalls=order)
+        status = {}
+        poll_mod.pagerduty_items(sample_cfg, 10, status)
+        assert status["schedule"] == "Primary" and status["until"] is not None
+        assert status["url"] == "https://acme.pagerduty.com/schedules/PSCHED1"
+        assert status["level"] == 1
+    # Alone, the permanent target still counts (with its policy link).
+    _pd_router(poll_mod, monkeypatch, oncalls=[perm])
     status = {}
     poll_mod.pagerduty_items(sample_cfg, 10, status)
     assert status["schedule"] == "Ops" and status["until"] is None
+    assert status["url"] == "https://acme.pagerduty.com/ep/P"
+
+
+def test_pagerduty_oncall_ignores_deeper_escalation_levels(poll_mod, monkeypatch,
+                                                            sample_cfg):
+    """Being the level-2/3 fallback on a policy is not "on-call now" (PagerDuty's
+    own UI only shows level 1). Such entries produce neither status nor
+    reminders by default."""
+    now = datetime.now(timezone.utc)
+    fallback = {"schedule": None,
+                "escalation_policy": {"id": "P", "summary": "[TECH][FE] App-ep"},
+                "start": None, "end": None, "escalation_level": 2}
+    deep_shift = _oncall(now - timedelta(minutes=2), now + timedelta(hours=8),
+                         sched_id="PS3", name="Tertiary")
+    deep_shift["escalation_level"] = 3
+    _pd_router(poll_mod, monkeypatch, oncalls=[fallback, deep_shift])
+    status = {}
+    items = _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10, status))
+    assert items == []
+    assert status["on_call"] is False
+    assert status["next_start"] is None
+    # ... but they are still *listed* so the menu can explain the situation,
+    # sorted by level, each with its PagerDuty link.
+    assert [(sh["level"], sh["name"], sh["direct"]) for sh in status["shifts"]] == [
+        (2, "[TECH][FE] App-ep", True), (3, "Tertiary", False)]
+    assert status["shifts"][1]["url"] == "https://acme.pagerduty.com/schedules/PS3"
+    assert status["shifts"][1]["until"] is not None
+    # Deeper upcoming shifts do not become "next" either.
+    later = _oncall(now + timedelta(hours=3), now + timedelta(hours=11), sched_id="PS9")
+    later["escalation_level"] = 2
+    _pd_router(poll_mod, monkeypatch, oncalls=[later])
+    status = {}
+    poll_mod.pagerduty_items(sample_cfg, 10, status)
+    assert status["next_start"] is None and status["shifts"] == []
+
+
+def test_pagerduty_oncall_shifts_sorted_and_deduped(poll_mod, monkeypatch,
+                                                    sample_cfg):
+    sample_cfg["pagerduty"]["oncall_max_level"] = 3
+    now = datetime.now(timezone.utc)
+    direct1 = {"schedule": None, "escalation_policy": {"id": "P", "summary": "Ops"},
+               "start": None, "end": None, "escalation_level": 1}
+    sched1 = _oncall(now - timedelta(hours=1), now + timedelta(hours=1))
+    sched1b = _oncall(now - timedelta(hours=1), now + timedelta(hours=1), policy="Other")
+    lvl2 = _oncall(now - timedelta(hours=1), now + timedelta(hours=3),
+                   sched_id="PS2", name="Secondary")
+    lvl2["escalation_level"] = 2
+    _pd_router(poll_mod, monkeypatch, oncalls=[lvl2, direct1, direct1, sched1, sched1b])
+    status = {}
+    poll_mod.pagerduty_items(sample_cfg, 10, status)
+    # Scheduled shift first within level 1, direct target after; then level 2.
+    # Duplicates (same schedule+start / same policy) collapse.
+    assert [(sh["level"], sh["name"], sh["direct"]) for sh in status["shifts"]] == [
+        (1, "Primary", False), (1, "Ops", True), (2, "Secondary", False)]
+    assert status["next_level"] == 0
+    # Upcoming counting shift carries its level.
+    nxt = _oncall(now + timedelta(hours=5), now + timedelta(hours=13), sched_id="PS5")
+    nxt["escalation_level"] = 2
+    _pd_router(poll_mod, monkeypatch, oncalls=[nxt])
+    status = {}
+    poll_mod.pagerduty_items(sample_cfg, 10, status)
+    assert status["next_level"] == 2
+
+
+def test_pagerduty_oncall_max_level_configurable(poll_mod, monkeypatch,
+                                                 sample_cfg):
+    sample_cfg["pagerduty"]["oncall_max_level"] = 2
+    now = datetime.now(timezone.utc)
+    lvl2 = _oncall(now - timedelta(minutes=2), now + timedelta(hours=8),
+                   sched_id="PS2", name="Secondary")
+    lvl2["escalation_level"] = 2
+    lvl3 = {"schedule": None, "escalation_policy": {"id": "P", "summary": "Ops"},
+            "start": None, "end": None, "escalation_level": 3}
+    _pd_router(poll_mod, monkeypatch, oncalls=[lvl3, lvl2])
+    status = {}
+    items = _oncall_items(poll_mod.pagerduty_items(sample_cfg, 10, status))
+    # Level 2 now counts, level 3 still does not (but both are listed).
+    assert status["on_call"] is True
+    assert status["schedule"] == "Secondary"
+    assert status["level"] == 2
+    assert len(items) == 1 and items[0]["subtitle"] == "On-call · Secondary"
+    assert [sh["level"] for sh in status["shifts"]] == [2, 3]
+
+
+def test_pagerduty_oncall_next_shift_carries_url(poll_mod, monkeypatch, sample_cfg):
+    now = datetime.now(timezone.utc)
+    oc = _oncall(now + timedelta(hours=5), now + timedelta(hours=13))
+    _pd_router(poll_mod, monkeypatch, oncalls=[oc])
+    status = {}
+    poll_mod.pagerduty_items(sample_cfg, 10, status)
+    assert status["on_call"] is False
+    assert status["next_url"] == "https://acme.pagerduty.com/schedules/PSCHED1"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, 1), (1, 1), (2, 2), ("3", 3), (0, 1), (-1, 1), ("x", 1), (2.0, 2),
+])
+def test_pd_oncall_max_level_parsing(poll_mod, raw, expected):
+    pd = {} if raw is None else {"oncall_max_level": raw}
+    assert poll_mod._pd_oncall_max_level(pd) == expected
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ({}, 1), ({"escalation_level": 2}, 2), ({"escalation_level": "3"}, 3),
+    ({"escalation_level": 0}, 1), ({"escalation_level": None}, 1),
+    ({"escalation_level": "n/a"}, 1),
+])
+def test_pd_level_parsing(poll_mod, raw, expected):
+    assert poll_mod._pd_level(raw) == expected
 
 
 def test_pagerduty_oncall_disabled(poll_mod, monkeypatch, sample_cfg):

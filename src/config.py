@@ -57,6 +57,7 @@ DEFAULT_CONFIG = {
         "low_urgency_sound": False,
         "oncall_reminders": True,
         "oncall_remind_before_minutes": [1440, 60],
+        "oncall_max_level": 1,
     },
     "poll": {
         "interval_seconds": 300,
