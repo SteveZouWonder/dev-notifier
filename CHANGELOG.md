@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+## [v2.0.0] - 2026-09-03
+
 ### Added
 - PagerDuty on-call shift reminders: a heads-up before your shift starts (default 1 day and 1 hour before, `pagerduty.oncall_remind_before_minutes`), when it starts, and when it ends (silent), sourced from `/oncalls`. Turn off with `pagerduty.oncall_reminders: false`
 - a **PagerDuty ▸** menu (when enabled) showing whether you are on-call right now and until when (or when your next shift starts), and the open incidents assigned to you — click one to open it. The Status line also shows `· on-call`
