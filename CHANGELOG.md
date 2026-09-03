@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - the "setup needed" / "Nothing to check" / dependency-check notifications carry an **Open** button that opens `config.json`
 - macOS: if the app was moved since **Start at login** was enabled, the LaunchAgent is re-pointed at the current location on the next launch; enabling it while running from the mounted DMG is refused with an explanation (that path vanishes when the image is ejected); failures to toggle it are reported instead of silently leaving the checkbox unchanged
 - `poll.interval_seconds` edits take effect on the next config reload (no relaunch)
+- pre-release builds: tagging `vX.Y.Z-<suffix>` (e.g. `v2.0.0-beta`) publishes a GitHub **pre-release**, which is excluded from `/releases/latest` so existing installs are not offered it by the in-app updater; the CHANGELOG `[Unreleased]` section is left in place for the final release. The updater now ranks a pre-release below its final version, so `2.0.0-beta` users are offered `2.0.0` (and `2.0.0` users are never offered the beta)
 
 ### Changed
 - the poll cursor is only advanced when every enabled source fetched successfully. Previously a failed fetch (401, timeout, VPN not up yet after wake) looked like "no news" and the window moved on, so the events from that interval were lost for good; they are now fetched on the next successful check (fingerprints prevent duplicates from the sources that did succeed)

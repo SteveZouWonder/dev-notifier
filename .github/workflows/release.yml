@@ -22,6 +22,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      # "true" for X.Y.Z-<suffix> (beta, rc, ...). Pre-releases are published
+      # flagged as such so they never become GitHub's "latest" release: the
+      # in-app updater reads /releases/latest, so an unflagged beta would be
+      # pushed to every existing user. Their CHANGELOG archive is skipped too,
+      # so the final X.Y.Z still gets the full [Unreleased] notes.
+      prerelease: ${{ steps.ver.outputs.prerelease }}
     steps:
       - name: Resolve version
         id: ver
@@ -33,11 +39,17 @@ jobs:
           fi
           version="${version#v}"
           if ! echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
-            echo "::error::Invalid version '$version' (expected X.Y.Z)"
+            echo "::error::Invalid version '$version' (expected X.Y.Z or X.Y.Z-suffix)"
             exit 1
           fi
+          if echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            prerelease=false
+          else
+            prerelease=true
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $version"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $version (prerelease=$prerelease)"
 
   build-macos:
     needs: prepare
@@ -177,9 +189,15 @@ jobs:
         id: notes
         run: |
           version="${{ needs.prepare.outputs.version }}"
-          # Previous version tag (for the "full compare" link). Take the tag
-          # ordered right before v${version}; fall back to the first commit.
-          prev="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | awk -v cur="v${version}" '$0==cur{found=1; next} found{print; exit}')"
+          # Previous version tag (for the "full compare" link). Take the final
+          # tag ordered right before v${version}; for a pre-release (which is
+          # not in the final-tag list) use the newest final tag; fall back to
+          # the first commit.
+          finals="$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$')"
+          prev="$(echo "$finals" | awk -v cur="v${version}" '$0==cur{found=1; next} found{print; exit}')"
+          if [ -z "$prev" ] && [ "${{ needs.prepare.outputs.prerelease }}" = "true" ]; then
+            prev="$(echo "$finals" | head -1)"
+          fi
           if [ -z "$prev" ]; then
             prev="$(git rev-list --max-parents=0 HEAD | tail -1)"
           fi
@@ -192,7 +210,10 @@ jobs:
           # real archival to the default branch happens in the `changelog` job
           # (via PR). `bump` is idempotent: if the version is already archived
           # (e.g. hand-archived earlier), it exits non-zero and we just extract.
-          if ! grep -q "## \[v${version}\]" CHANGELOG.md; then
+          # Pre-releases skip this: their notes are the current [Unreleased]
+          # section as-is, which stays in place for the final release.
+          if [ "${{ needs.prepare.outputs.prerelease }}" != "true" ] && \
+             ! grep -q "## \[v${version}\]" CHANGELOG.md; then
             python scripts/bump_changelog.py bump \
               --version "$version" \
               --until "v${version}" || true
@@ -215,6 +236,9 @@ jobs:
         with:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.prepare.outputs.version) }}
           name: Dev Notifier ${{ needs.prepare.outputs.version }}
+          # X.Y.Z-suffix -> flagged pre-release (excluded from /releases/latest,
+          # so existing installs are not offered it by the in-app updater).
+          prerelease: ${{ needs.prepare.outputs.prerelease == 'true' }}
           # Release notes come from the CHANGELOG-derived release_notes.md,
           # keeping the release page consistent with the CHANGELOG.
           body_path: release_notes.md
@@ -227,7 +251,8 @@ jobs:
   # Auto-archive CHANGELOG: fold [Unreleased] into the released version section,
   # commit to a new branch and open a PR (no direct push to the default branch,
   # to respect branch protection). Runs only when a v* tag is pushed; manual
-  # workflow_dispatch runs do not archive.
+  # workflow_dispatch runs and pre-releases (X.Y.Z-suffix) do not archive, so
+  # the final X.Y.Z release still folds the complete [Unreleased] section.
   #
   # Prerequisite (one of the following, otherwise "Create PR" fails on perms):
   #   1) Settings -> Actions -> General -> Workflow permissions:
@@ -237,7 +262,7 @@ jobs:
   # ---------------------------------------------------------------------------
   changelog:
     needs: [prepare, release]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && needs.prepare.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write

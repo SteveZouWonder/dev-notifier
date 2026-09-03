@@ -158,18 +158,24 @@ def current_version() -> str:
 
 
 def parse_version(v: str):
-    """Parse ``[v]X.Y.Z[-suffix]`` into a comparable tuple of the numeric core.
+    """Parse ``[v]X.Y.Z[-suffix]`` into a comparable tuple.
 
-    Pre-release / build suffixes are ignored for comparison (a release DMG is
-    only ever published for a full ``vX.Y.Z``). Returns ``None`` if unparseable.
+    The result is ``(X, Y, Z, final, suffix)`` where ``final`` is 1 for a plain
+    ``X.Y.Z`` and 0 for a pre-release (``2.0.0-beta``, ``2.0.0-rc.1``), so a
+    pre-release sorts *below* its final version: someone running ``2.0.0-beta``
+    is offered ``2.0.0``, while ``2.0.0`` users are never offered
+    ``2.0.0-beta``. Pre-releases of the same core compare by suffix string
+    (``beta`` < ``rc.1``), which matches the usual naming. Returns ``None`` if
+    unparseable.
     """
     if not v:
         return None
     v = v.strip().lstrip("vV")
-    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", v)
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-.]([0-9A-Za-z.]+))?$", v)
     if not m:
         return None
-    return tuple(int(g) for g in m.groups())
+    x, y, z, suffix = m.groups()
+    return (int(x), int(y), int(z), 0 if suffix else 1, suffix or "")
 
 
 def is_newer(latest: str, current: str) -> bool:
