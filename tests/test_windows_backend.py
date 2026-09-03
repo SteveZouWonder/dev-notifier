@@ -466,3 +466,73 @@ def test_repeating_timer_stop_before_fire(win_mod, monkeypatch):
     t = win_mod._RepeatingTimer(lambda _: None, 5)
     t.start()
     t.stop()  # cancels cleanly
+
+
+# ---------------------------------------------------------------------------
+# Smoke test against the REAL pystray classes (runs wherever pystray imports:
+# the Windows CI job and any dev box with it installed; skipped elsewhere).
+# Every other test here uses the fake_pystray stub, which is only as strict as
+# we remember to make it — this one builds the app's complete menu through
+# pystray's own MenuItem/Menu validation, which is exactly where 2.0.0-beta
+# crashed at startup on Windows.
+# ---------------------------------------------------------------------------
+
+def test_real_pystray_accepts_full_app_menu(temp_home, monkeypatch):
+    pystray = pytest.importorskip("pystray")
+    import importlib
+    import config as config_mod
+    importlib.reload(config_mod)
+    import notifier_app
+    importlib.reload(notifier_app)
+    from conftest import FakeBackend
+    import platform_backend.windows as win_mod
+
+    # Build the menu the app really shows (all submenus, checkmarks, disabled
+    # lines, Recent entries, PagerDuty levels) with the recording backend...
+    app = notifier_app.NotifierApp(backend=FakeBackend())
+    app.dep_status = {"ok": True, "problems": [], "pending": False,
+                      "jira_ok": True, "jira": {"enabled": True},
+                      "github_ok": True, "pagerduty_ok": True,
+                      "gh": {"installed": True, "authed": True}}
+    app.cfg["pagerduty"] = {"enabled": True}
+    app.pd_status = {"on_call": True, "until": None, "schedule": "Ops",
+                     "url": "https://pd/ep/P", "level": 1,
+                     "shifts": [{"level": 1, "name": "Ops", "until": None,
+                                 "url": "https://pd/ep/P", "direct": True},
+                                {"level": 3, "name": "FE-ep", "until": None,
+                                 "url": "https://pd/ep/Q", "direct": True}],
+                     "next_start": None,
+                     "active_incidents": [{"number": 1, "status": "triggered",
+                                           "urgency": "high", "title": "Disk",
+                                           "url": "https://pd/1"}]}
+    app.recent = [{"id": 1, "label": "ACME-1 · Done — fixed", "url": "https://j/1"}]
+    app.update_info = {"available": True, "latest": "9.9.9", "html_url": "u"}
+    app.cfg_problems = ["unknown setting 'jira.supress_self'"]
+    app._build_menu()
+
+    # ... then translate every item with the real pystray classes. A callback
+    # with the wrong arity raises ValueError right here, like it did at launch.
+    backend = win_mod.WindowsBackend()
+    translated = [backend._to_pystray(i) for i in app.menu]
+    menu = pystray.Menu(*translated)
+
+    def walk(m):
+        for it in m.items:
+            if it is pystray.Menu.SEPARATOR:
+                continue
+            yield it
+            if it.submenu is not None:
+                yield from walk(it.submenu)
+
+    items = list(walk(menu))
+    assert len(items) > 20
+    # Properties resolve without error and callbacks fire back into the app.
+    for it in items:
+        it.text, it.checked, it.enabled, it.visible
+    theme_menu = next(it for it in items if it.text == "Theme").submenu
+    green = next(it for it in theme_menu.items if it.text == "Green")
+    green(icon=None)  # pystray calls action(icon, item) via __call__
+    assert app.cfg["theme"] == "Green"
+    on_call_row = next(it for it in items if it.text.startswith("Fallback on-call"))
+    on_call_row(icon=None)
+    assert app.backend.opened_urls[-1] == "https://pd/ep/Q"
