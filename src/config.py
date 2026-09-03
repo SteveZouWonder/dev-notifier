@@ -48,6 +48,10 @@ DEFAULT_CONFIG = {
         "user_id": "",
         "team_ids": [],
         "suppress_self": True,
+        "notify_team_incidents": True,
+        "low_urgency_sound": False,
+        "oncall_reminders": True,
+        "oncall_remind_before_minutes": [1440, 60],
     },
     "poll": {
         "interval_seconds": 300,
@@ -94,9 +98,12 @@ _TEMPLATE = {
         "enabled": False,
         "api_token": "",
         "_note": "Optional. Set enabled to true and paste a PagerDuty User API "
-                 "token to get incident notifications. Add \"suppress_self\": "
-                 "false to also be notified of status changes you made "
-                 "yourself (on by default = hidden).",
+                 "token to get incident + on-call shift notifications. Add "
+                 "\"suppress_self\": false to also be notified of actions you "
+                 "took yourself (on by default = hidden); "
+                 "\"notify_team_incidents\": false to only hear about "
+                 "incidents assigned to you; \"oncall_reminders\": false to "
+                 "turn off shift reminders. See the TUTORIAL for more.",
     },
     "theme": "Orange",
     "_theme_options": "Orange | Green | Purple | Rainbow | Yellow "

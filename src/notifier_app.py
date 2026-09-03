@@ -1,5 +1,5 @@
-"""Tray/menu-bar app: polls Jira/GitHub on a timer, shows native notifications,
-and opens the relevant URL when a notification is clicked.
+"""Tray/menu-bar app: polls Jira/GitHub/PagerDuty on a timer, shows native
+notifications, and opens the relevant URL when a notification is clicked.
 
 The GUI toolkit is abstracted behind a platform backend (see
 ``platform_backend``): macOS uses rumps (AppKit), Windows uses pystray +
@@ -188,6 +188,9 @@ class NotifierApp:
             "error": None,
         }
         self._downloading = False  # guard against overlapping downloads
+        # PagerDuty side data from the last poll (on-call shift + open
+        # incidents assigned to you), rendered as a "PagerDuty ▸" submenu.
+        self.pd_status = {}
         self.menu = []  # neutral MenuItem list (also read by tests)
         self._build_menu()
         # Run the first dependency check + startup warning shortly after the
@@ -388,7 +391,7 @@ class NotifierApp:
         """On startup, if nothing is usable, guide the user via a notification."""
         if not self.dep_status.get("ok"):
             msg = self.dep_status["problems"][0] if self.dep_status["problems"] \
-                else "Open config file to set up Jira/GitHub."
+                else "Open config file to set up Jira/GitHub/PagerDuty."
             try:
                 self._post_notification(
                     title="Dev Notifier — setup needed",
@@ -409,6 +412,9 @@ class NotifierApp:
             items = [MenuItem("Check now", callback=self.check_now)]
         # status line
         items.append(self._status_menuitem())
+        pd_item = self._pagerduty_menuitem()
+        if pd_item is not None:
+            items.append(pd_item)
         items.append(MenuItem.sep())
         if self.recent:
             items.append(MenuItem("Recent:", callback=None))
@@ -437,6 +443,69 @@ class NotifierApp:
     def _quit(self, _=None):
         self.backend.quit()
 
+    # How many open incidents assigned to you to list in the PagerDuty submenu.
+    PD_MENU_INCIDENTS = 5
+
+    def _pagerduty_menuitem(self):
+        """PagerDuty ▸ submenu: on-call shift + open incidents assigned to you.
+
+        Only shown when PagerDuty is enabled. The data comes from the last
+        poll (``self.pd_status``); before the first poll it shows a
+        placeholder. Each listed incident opens in the browser when clicked.
+        """
+        if not self.cfg.get("pagerduty", {}).get("enabled"):
+            return None
+        s = self.pd_status or {}
+        active = s.get("active_incidents") or []
+        if s.get("on_call"):
+            head = "PagerDuty: on-call"
+        elif "on_call" in s:
+            head = "PagerDuty: not on-call"
+        else:
+            head = "PagerDuty"
+        if active:
+            head += f" · {len(active)} open"
+        parent = MenuItem(head)
+        if "on_call" not in s:
+            parent.add(MenuItem("Waiting for first check…", callback=None))
+            return parent
+        if s.get("on_call"):
+            until = poll_mod.pd_format_time(s.get("until"))
+            line = "On-call now"
+            if until:
+                line += f" until {until}"
+            if s.get("schedule"):
+                line += f" ({s['schedule']})"
+        else:
+            line = "Not on-call"
+            nxt = poll_mod.pd_format_time(s.get("next_start"))
+            if nxt:
+                line += f" · next: {nxt}"
+                if s.get("next_schedule"):
+                    line += f" ({s['next_schedule']})"
+        parent.add(MenuItem(line, callback=None))
+        parent.add(MenuItem.sep())
+        if not active:
+            parent.add(MenuItem("No open incidents assigned to you",
+                                callback=None))
+            return parent
+        parent.add(MenuItem(f"Open incidents assigned to you: {len(active)}",
+                            callback=None))
+        for inc in active[:self.PD_MENU_INCIDENTS]:
+            label = f"#{inc.get('number', '')} {inc.get('status', '')}"
+            if inc.get("urgency") == "high":
+                label += " ⚡"
+            label = f"{label} — {inc.get('title', '')}"[:80]
+            item = MenuItem(label, callback=self._open_pd_incident)
+            item.url = inc.get("url", "")
+            parent.add(item)
+        return parent
+
+    def _open_pd_incident(self, sender):
+        url = getattr(sender, "url", "")
+        if url:
+            self.backend.open_url(url)
+
     def _status_menuitem(self):
         """Status ▸ submenu with one short line per source (Jira / GitHub)."""
         s = self.dep_status
@@ -461,6 +530,8 @@ class NotifierApp:
             github_line = "GitHub: Off"
         if s.get("pagerduty_ok"):
             pd_line = "PagerDuty: ✓ Ready"
+            if self.pd_status.get("on_call"):
+                pd_line += " · on-call"
         elif self.cfg.get("pagerduty", {}).get("enabled"):
             pd_line = "PagerDuty: ⚠ Needs token"
         else:
@@ -506,10 +577,15 @@ class NotifierApp:
                         data={}, sound=False,
                     )
                 else:
+                    ready = [name for name, key in (("Jira", "jira_ok"),
+                                                    ("GitHub", "github_ok"),
+                                                    ("PagerDuty", "pagerduty_ok"))
+                             if status.get(key)]
                     self._post_notification(
                         title="Dev Notifier — dependency check",
                         subtitle="All good",
-                        message="Jira / GitHub are ready.",
+                        message=(" / ".join(ready) + " ready." if ready
+                                 else "All sources ready."),
                         data={}, sound=False,
                     )
 
@@ -660,7 +736,7 @@ class NotifierApp:
                         subtitle="Nothing to check",
                         message=(dep_status["problems"][0]
                                  if dep_status["problems"]
-                                 else "Configure Jira/GitHub first."),
+                                 else "Configure Jira/GitHub/PagerDuty first."),
                         data={}, sound=False,
                     )
 
@@ -673,8 +749,10 @@ class NotifierApp:
         # update that lands during this poll is caught by the next one.
         since_ts = self.state.get("last_poll")
         poll_started = time.time()
+        extra = {}  # side data for the menu (PagerDuty on-call / open incidents)
         try:
-            phases = poll_mod.collect_all(cfg, log=_log, since_ts=since_ts)
+            phases = poll_mod.collect_all(cfg, log=_log, since_ts=since_ts,
+                                          extra=extra)
         except Exception as e:  # noqa: BLE001
             _log(f"ERROR collect_all: {e}")
             # Bind the message here: ``e`` is scoped to this ``except`` block and
@@ -700,6 +778,8 @@ class NotifierApp:
         def apply_results(_):
             self.cfg = cfg
             self.dep_status = dep_status
+            if extra.get("pagerduty"):
+                self.pd_status = extra["pagerduty"]
             seen = self.state.setdefault("seen", {})
             new_count = 0
             for _phase, items in phases:
@@ -747,14 +827,16 @@ class NotifierApp:
     def _notify(self, it: dict):
         url = it.get("url", "")
         _log(f"NOTIFY [{it['title']}] {it['subtitle']} | {it['message']} -> {url}")
-        # Notify only; clicking the notification opens the URL.
+        # Notify only; clicking the notification opens the URL. Sources may
+        # ask for a silent notification via ``sound: False`` (e.g. PagerDuty
+        # low-urgency incidents / on-call shift ended).
         try:
             self._post_notification(
                 title=it["title"],
                 subtitle=it["subtitle"],
                 message=it["message"],
                 data={"url": url},
-                sound=True,
+                sound=bool(it.get("sound", True)),
             )
         except Exception as e:  # noqa: BLE001
             _log(f"ERROR notification: {e}")

@@ -24,9 +24,11 @@ every few minutes:
   PRs (via the `gh` CLI notifications API).
 - **GitHub CI (fallback)** — the CI rollup of your open PRs, so you get pinged
   on ❌ failures / ⏳ pending even if notification settings suppress them.
-- **PagerDuty** — incidents assigned to you (triggered/acknowledged) and your
-  teams' incidents changed recently, so acknowledge / resolve / escalate status
-  changes resurface (via the PagerDuty REST API).
+- **PagerDuty** — every change on incidents assigned to you or your teams
+  (triggered, acknowledged, escalated / reassigned **to you**, resolved, notes,
+  priority changes, responder requests), each saying who did it; plus on‑call
+  shift reminders (heads‑up before your shift, start, end) and a menu showing
+  whether you're on‑call and your open incidents (via the PagerDuty REST API).
 
 When something new shows up it raises a **native desktop notification**, and
 **clicking the notification opens the Jira issue / PR / incident in your
@@ -86,7 +88,9 @@ usually only need three Jira values:
   [`gh` CLI](https://cli.github.com). Run `gh auth login` once, or set
   `"enabled": false` under `github` to turn it off.
 - **PagerDuty** *(off by default)*: set `"enabled": true` and paste a **User API
-  token** into `api_token`.
+  token** into `api_token`. On‑call reminders and team incident events are on by
+  default; see the Tutorial for `oncall_reminders`, `notify_team_incidents`,
+  `low_urgency_sound` and friends.
 
 After editing, save and click **Check dependencies** in the menu. The config
 file stays on your machine and is never committed. For a step‑by‑step walkthrough
@@ -96,6 +100,9 @@ and the full list of advanced options, see the **[Tutorial](TUTORIAL.md)**.
 
 - **Check now** — poll immediately (manual pull).
 - **Status:** — shows whether Jira / GitHub / PagerDuty are ready; click to re-check.
+- **PagerDuty ▸** *(when enabled)* — whether you're on‑call right now (and until
+  when) or when your next shift starts, plus your open incidents; click one to
+  open it.
 - **Recent:** — the last items seen; hover → **Open** / **Remove**.
 - **Clear all recent** — empty the list.
 - **Theme ▸** — switch the tray icon color.

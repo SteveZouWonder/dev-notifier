@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+### Added
+- PagerDuty on-call shift reminders: a heads-up before your shift starts (default 1 day and 1 hour before, `pagerduty.oncall_remind_before_minutes`), when it starts, and when it ends (silent), sourced from `/oncalls`. Turn off with `pagerduty.oncall_reminders: false`
+- a **PagerDuty ▸** menu (when enabled) showing whether you are on-call right now and until when (or when your next shift starts), and the open incidents assigned to you — click one to open it. The Status line also shows `· on-call`
+- PagerDuty now notifies when an incident is **escalated or reassigned to you**, when someone **requests you as a responder**, when a **note mentions you**, and on **notes, priority/urgency changes, snoozes, ack timeouts and exhausted escalation paths** on incidents assigned to you or your teams; each notification says who did it (e.g. `[assigned to you] escalated to you by Bob — Disk full`)
+- low-urgency PagerDuty incidents are tagged `· low urgency` and notify silently; set `pagerduty.low_urgency_sound: true` to keep the sound. `pagerduty.notify_team_incidents: false` limits notifications to incidents assigned to you (plus escalations / responder requests aimed at you)
+
+### Changed
+- PagerDuty incident notifications are now driven by the incident **timeline** (`/log_entries`) instead of polling incident status: every event has a stable id, so each acknowledge / resolve / escalate / reassign notifies exactly once, transitions that don't change the status (reassign, escalate) are no longer missed, and resolves of incidents assigned to you are detected even when you have no teams or the incident is old. A new incident's trigger + initial assignment is reported as a single notification
+- `pagerduty.suppress_self` now applies to incidents assigned to you as well (previously only to team incidents), so acknowledging your own incident no longer pops up a notification
+- the PagerDuty identity lookup (`/users/me`) is cached for 6 hours instead of running on every poll when `user_id`/`team_ids` are left blank, and incident/timeline/on-call queries follow pagination instead of stopping at 50 results
+- the "All good" dependency-check and "setup needed" messages now mention PagerDuty (previously only Jira/GitHub); the TUTORIAL documents `suppress_self` and the new PagerDuty options
+
 ## [v1.5.8] - 2026-07-15
 
 ### Added
