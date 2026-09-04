@@ -203,9 +203,11 @@ outlined in red:
    ```json
    "pagerduty": {
      "enabled": true,
-     "api_token": "u+AbCdEfGhIjKlMnOpQr"
+     "api_token": "<your PagerDuty User API token>"
    }
    ```
+   Replace the whole placeholder (including the angle brackets) with the
+   20‑character key you copied in Step 2.
 3. **Save** the file, then click **Check dependencies** — the Status menu
    should show **PagerDuty: ✓ Ready**.
 4. Click **Check now**. If the key is wrong or was revoked, Status shows
@@ -250,7 +252,7 @@ Then add them next to the token:
 ```json
 "pagerduty": {
   "enabled": true,
-  "api_token": "u+AbCdEfGhIjKlMnOpQr",
+  "api_token": "<your PagerDuty User API token>",
   "user_id": "PXXXXXX",
   "team_ids": ["PYYYYYY"]
 }
