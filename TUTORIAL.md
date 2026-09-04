@@ -212,6 +212,12 @@ outlined in red:
    `PagerDuty: ⚠ HTTP 401 unauthorized` and a ⚠ appears next to the icon;
    otherwise **PagerDuty ▸** fills in with your on‑call state.
 
+Once it's working, the menu looks like this — the **PagerDuty: …** row
+summarises your current shift, and hovering it shows the details (which
+schedule, until when, and the incidents assigned to you):
+
+![Dev Notifier menu with the PagerDuty row expanded, showing "Backup on-call (level 2) until Fri 21:00" and "No open incidents assigned to you"](docs/images/pagerduty/04-menu-pagerduty-oncall.png)
+
 Your teams and user ID are detected automatically from the token. You'll be
 notified about incidents on your teams and anything assigned to you, and get a
 heads‑up **1 day** and **1 hour** before each on‑call shift (plus when it starts
