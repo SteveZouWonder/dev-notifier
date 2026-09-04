@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Record unreleased changes for the next version here. On release they are moved under the corresponding version number.
 
+### Changed
+- Tutorial: the PagerDuty setup now includes annotated screenshots of the **User Settings → API Access** page and explains how to read your user ID and team ID from the PagerDuty URL to pin `pagerduty.user_id` / `team_ids` when you only want one team's incidents
+
 ## [v2.0.0] - 2026-09-03
 
 ### Added
