@@ -174,7 +174,7 @@ on‑call". Any PagerDuty user can create one; no admin rights needed.
 3. Click the **User Settings** tab. Direct link, once you know both values:
 
    ```
-   https://<your-subdomain>.pagerduty.com/users/<YOUR-USER-ID>
+   https://<your-subdomain>.pagerduty.com/users/<YOUR-USER-ID>/settings
    ```
    → **User Settings** tab → scroll to **API Access**.
 
@@ -182,11 +182,18 @@ on‑call". Any PagerDuty user can create one; no admin rights needed.
 
 **Step 2 — Create the token**
 
-1. Under **API Access**, click **Create API User Token**.
+1. Under **API Access**, click **Create API User Token** (labelled
+   **Create API User Key** in newer UIs).
 2. Enter a **Description** such as `dev-notifier` (so you can recognise — and
    later revoke — it), then click **Create Key**.
 3. **Copy the 20‑character key now.** PagerDuty shows it only once; if you lose
    it, delete it and create a new one. Click **Close**.
+
+The page looks like this — the **User Settings** tab, the **API Access**
+section with the create button, and your user ID in the address bar are all
+outlined in red:
+
+![PagerDuty User Settings → API Access; the user ID is the `P…` code in the URL](docs/images/pagerduty/01-user-settings-api-access.png)
 
 **Step 3 — Put it in Dev Notifier**
 
@@ -210,6 +217,41 @@ notified about incidents on your teams and anything assigned to you, and get a
 heads‑up **1 day** and **1 hour** before each on‑call shift (plus when it starts
 and ends). Low‑urgency incidents notify silently. To change any of this, see the
 `pagerduty.*` rows under [Advanced config fields](#advanced-config-fields).
+
+**Optional — pin your user ID and team(s)**
+
+Auto‑detection uses every team you're a member of. If you belong to several
+teams but only want incidents from one, or your PagerDuty user isn't on the
+team whose incidents you care about, set `user_id` and `team_ids` explicitly.
+Both are short codes starting with `P` and can be read straight from the
+address bar:
+
+- **User ID** — the code in the URL of your profile from Step 1:
+  `https://<your-subdomain>.pagerduty.com/users/`**`PXXXXXX`**`/settings`.
+- **Team ID** — open **Services**, click the service you want to watch, and
+  click the link under **TEAM**:
+
+  ![PagerDuty service page; the TEAM link opens the team](docs/images/pagerduty/02-service-team-link.png)
+
+  The team page's URL contains the team ID:
+  `https://<your-subdomain>.pagerduty.com/teams/`**`PXXXXXX`**`/schedules`.
+  (The **Schedules** tab also shows the on‑call rotations the app will report.)
+
+  ![PagerDuty team page; the team ID is the `P…` code in the URL](docs/images/pagerduty/03-team-schedules-team-id.png)
+
+Then add them next to the token:
+
+```json
+"pagerduty": {
+  "enabled": true,
+  "api_token": "u+AbCdEfGhIjKlMnOpQr",
+  "user_id": "PXXXXXX",
+  "team_ids": ["PYYYYYY"]
+}
+```
+
+`team_ids` is a list, so you can name more than one team. Leave either field
+out (or empty) to keep auto‑detecting it.
 
 > **EU accounts** (`https://<subdomain>.eu.pagerduty.com`) are not supported
 > yet — the app talks to the US API host. Status will show
@@ -412,7 +454,7 @@ behaviour:
 | `jira.suppress_automation` | `true` | Hide changes made by apps/automation rules (e.g. "Automation for Jira" moving a ticket after you opened a PR) — unless they assign the issue to you |
 | `github.ci_notify` | `["fail"]` | Which CI roll‑up states on your own open PRs pop up a notification (`fail`, `pending`, `pass`); the others are remembered silently. `[]` turns CI notifications off |
 | `github.emails` | `[]` | Extra git author emails that count as *you* when GitHub cannot link a commit to your account (e.g. a mistyped `git config user.email`). Your profile's public email is picked up automatically |
-| `pagerduty.user_id` / `team_ids` | auto | Leave blank to auto‑detect |
+| `pagerduty.user_id` / `team_ids` | auto | Leave blank to auto‑detect from the token. Set them to restrict incidents to specific teams — see [PagerDuty → Optional](#pagerduty) for where to find the IDs |
 | `pagerduty.notify_team_incidents` | `true` | Also notify about your teams' incidents, not just ones assigned to you |
 | `pagerduty.low_urgency_sound` | `false` | Play a sound for low‑urgency incidents too (they're silent by default) |
 | `pagerduty.oncall_reminders` | `true` | Notify before / at the start / at the end of your on‑call shifts |
